@@ -1,0 +1,12 @@
+{
+  "name": "@freecompute/api-types",
+  "version": "0.1.0",
+  "description": "Shared TypeScript types for all FreeCompute services",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT"
+}

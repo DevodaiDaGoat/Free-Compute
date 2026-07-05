@@ -1,0 +1,24 @@
+{
+  "name": "@freecompute/service-common",
+  "version": "0.1.0",
+  "description": "Shared Express middleware, error handling, and service bootstrap for FreeCompute TypeScript services",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "jsonwebtoken": "^9.0.2",
+    "express-rate-limit": "^7.4.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7"
+  },
+  "peerDependencies": {
+    "@freecompute/api-types": "workspace:*"
+  },
+  "license": "MIT"
+}
