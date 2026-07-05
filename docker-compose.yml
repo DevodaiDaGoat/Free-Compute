@@ -1,0 +1,102 @@
+version: "3.9"
+
+services:
+  # --- Infrastructure ---
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: freecompute
+      POSTGRES_USER: freecompute
+      POSTGRES_PASSWORD: localdev  # Local dev only — not a real secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U freecompute"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # --- Services ---
+  gateway:
+    build: ./apps/gateway
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      ENVIRONMENT: development
+      REDIS_URL: redis://redis:6379
+      AUTH_SERVICE_URL: http://auth-service:3001
+      SCHEDULER_URL: http://scheduler:8081
+      BILLING_URL: http://billing-service:3002
+      FILE_SERVICE_URL: http://file-service:8082
+      ALLOWED_ORIGINS: http://localhost:3000
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  auth-service:
+    build: ./apps/auth-service
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: "3001"
+      DATABASE_URL: postgres://freecompute:localdev@postgres:5432/freecompute
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  scheduler:
+    build: ./apps/scheduler
+    ports:
+      - "8081:8081"
+    environment:
+      PORT: "8081"
+      ENVIRONMENT: development
+      DATABASE_URL: postgres://freecompute:localdev@postgres:5432/freecompute
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  billing-service:
+    build: ./apps/billing-service
+    ports:
+      - "3002:3002"
+    environment:
+      PORT: "3002"
+      DATABASE_URL: postgres://freecompute:localdev@postgres:5432/freecompute
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  file-service:
+    build: ./apps/file-service
+    ports:
+      - "8082:8082"
+    environment:
+      PORT: "8082"
+      ENVIRONMENT: development
+      STORAGE_TYPE: local
+      STORAGE_PATH: /data/files
+    volumes:
+      - file_storage:/data/files
+
+volumes:
+  postgres_data:
+  file_storage:

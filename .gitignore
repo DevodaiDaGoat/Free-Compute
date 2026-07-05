@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Build outputs
+dist/
+*.exe
+*.out
+
+# Environment & Secrets — NEVER commit
+.env
+.env.*
+*.pem
+*.key
+*.crt
+credentials.json
+service-account.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+postgres_data/
+file_storage/
+
+# Go
+*.test
+coverage.out
+
+# TypeScript
+*.tsbuildinfo
+
+# Logs
+*.log
