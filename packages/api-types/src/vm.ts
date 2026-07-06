@@ -1,3 +1,5 @@
+import type { ResourceClass, SessionMode, StreamPreset } from './remote';
+
 export type VMState = 'running' | 'paused' | 'stopped' | 'starting' | 'error';
 
 export interface VM {
@@ -10,6 +12,10 @@ export interface VM {
   ramGb: number;
   storageGb: number;
   gpuVramGb?: number; // Optional GPU allocation
+  resourceClass?: ResourceClass;
+  preferredSessionMode?: SessionMode;
+  streamPreset?: StreamPreset;
+  gpuDedicated?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -20,6 +26,12 @@ export interface LaunchVMRequest {
   ramGb: number;
   storageGb: number;
   gpuVramGb?: number;
+  resourceClass?: ResourceClass;
+  preferredSessionMode?: SessionMode;
+  streamPreset?: StreamPreset;
+  gpuRequired?: boolean;
+  gpuPreferred?: boolean;
+  latencyBudgetMs?: number;
   region?: string; // Preferred region
 }
 

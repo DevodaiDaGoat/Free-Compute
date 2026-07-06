@@ -6,3 +6,5 @@ export * from './credits';
 export * from './host';
 export * from './api';
 export * from './websocket';
+export * from './remote';
+export * from './proxy';

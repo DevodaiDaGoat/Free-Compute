@@ -12,6 +12,8 @@ gateway/
 │   │   ├── auth.go
 │   │   ├── vm.go
 │   │   ├── queue.go
+│   │   ├── sessions.go
+│   │   ├── proxy.go
 │   │   ├── files.go
 │   │   └── credits.go
 │   │
@@ -24,6 +26,15 @@ gateway/
 │   │   ├── hub.go                 # Connection hub
 │   │   ├── client.go              # Connection handler
 │   │   └── message.go
+│   │
+│   ├── tunnel/
+│   │   ├── config.go              # Env-driven tunnel route config
+│   │   ├── routes.go              # HTTP/TCP/UDP/SSH/WebRTC route registry
+│   │   ├── http_proxy.go          # HTTP(S) and upstream WebSocket reverse proxy
+│   │   ├── tcp.go                 # Raw TCP and HTTP CONNECT relays
+│   │   ├── udp.go                 # UDP datagram relay
+│   │   ├── websocket.go           # Browser WebSocket to TCP/SSH bridge
+│   │   └── signaling.go           # WebRTC/P2P long-poll signaling
 │   │
 │   ├── config/
 │   │   └── config.go
@@ -212,6 +223,9 @@ api-types/
 │   ├── credits.ts
 │   ├── user.ts
 │   ├── host.ts
+│   ├── remote.ts
+│   ├── proxy.ts
+│   ├── websocket.ts
 │   └── api.ts
 │
 ├── package.json
@@ -274,6 +288,9 @@ vms
 ├── cpu_cores
 ├── ram_gb
 ├── storage_gb
+├── resource_class
+├── preferred_session_mode
+├── stream_preset
 ├── created_at
 └── updated_at
 
@@ -284,6 +301,11 @@ hosts
 ├── cpu_cores
 ├── ram_gb
 ├── gpu_vram_gb
+├── gpu_model
+├── driver_version
+├── encoder_support
+├── network_profile
+├── capabilities
 ├── online
 ├── last_heartbeat
 └── created_at
@@ -294,6 +316,40 @@ queue
 ├── position
 ├── joined_at
 ├── estimated_wait_seconds
+├── session_type
+├── session_mode
+├── resource_class
+├── latency_budget_ms
+├── gpu_preferred
+└── updated_at
+
+remote_sessions
+├── id (UUID)
+├── user_id (FK)
+├── host_id (FK, nullable)
+├── vm_id (FK, nullable)
+├── type
+├── mode
+├── resource_class
+├── state
+├── stream_profile
+├── permissions
+├── network_quality
+├── expires_at
+├── created_at
+└── updated_at
+
+proxy_routes
+├── id (UUID)
+├── user_id (FK)
+├── session_id (FK, nullable)
+├── protocol
+├── mode
+├── target
+├── ingress
+├── state
+├── expires_at
+├── created_at
 └── updated_at
 ```
 
@@ -316,6 +372,18 @@ GET    /queue/status
 POST   /queue/join
 POST   /queue/leave
 
+GET    /sessions
+POST   /sessions
+PATCH  /sessions/:id/permissions
+POST   /sessions/:id/end
+GET    /sessions/:id/audit-log
+
+POST   /remote-support/invites
+
+GET    /proxy/routes
+POST   /proxy/routes
+DELETE /proxy/routes/:id
+
 GET    /credits
 POST   /credits/purchase
 
@@ -323,4 +391,9 @@ GET    /admin/hosts
 POST   /admin/hosts/:id/restart
 
 WS     /stream/:vm_id
+ANY    /proxy/:route_id/*
+CONNECT /connect/:route_id
+WS     /ws/:route_id
+GET    /signal/:route_id/rooms/:room_id
+POST   /signal/:route_id/rooms/:room_id
 ```

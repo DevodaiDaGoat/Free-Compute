@@ -8,6 +8,7 @@ Launch powerful cloud desktops directly from your browser. Powered by donated co
 
 - [Getting Started](docs/GETTING_STARTED.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Remote Access & Streaming](docs/REMOTE_ACCESS_STREAMING.md)
 - [Contributing](CONTRIBUTING.md)
 - [Roadmap](docs/ROADMAP.md)
 
@@ -18,6 +19,8 @@ Launch powerful cloud desktops directly from your browser. Powered by donated co
 - 💳 Credit-based resource allocation
 - 🔐 Secure, isolated virtual machines
 - 🎮 Gaming, development, and work ready
+- 🕹️ Low-latency WebRTC streaming and controller input
+- 🔁 HTTP, WebSocket, TCP, UDP, SSH, WebRTC, and P2P tunnel contracts
 - 📦 Open source and extensible
 
 ## 📚 Stack
@@ -28,7 +31,7 @@ Launch powerful cloud desktops directly from your browser. Powered by donated co
 
 **Desktop**: Custom WebOS | WebRTC streaming | QEMU/KVM
 
-**Deployment**: Docker | Kubernetes | Cloudflare Tunnel
+**Deployment**: Docker | Kubernetes | BunnyCDN-ready edge ingress | Cloudflare Tunnel
 
 ## 🔄 Project Status
 
