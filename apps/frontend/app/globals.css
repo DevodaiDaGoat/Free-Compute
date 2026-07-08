@@ -222,6 +222,15 @@ code {
   font-size: 13px;
 }
 
+.rtt-panel {
+  margin-bottom: 12px;
+}
+
+.rtt-sparkline {
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
 .signal-stage {
   position: relative;
   height: 170px;

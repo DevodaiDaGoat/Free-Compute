@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/freecompute/free-compute/apps/gateway/internal/auth"
 )
 
 const (
@@ -44,6 +46,13 @@ func (s *Server) handleWebSocketTunnel(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(route, w, r) {
 		return
 	}
+	if user := auth.UserFromContext(r); user != nil {
+		if !s.incrementUserConns(user.ID) {
+			s.writeConnLimitReached(w, route.ID)
+			return
+		}
+		defer s.decrementUserConns(user.ID)
+	}
 	if route.Protocol != ProtocolTCP && route.Protocol != ProtocolSSH && route.Protocol != ProtocolUDP {
 		http.Error(w, "route does not support websocket tunneling", http.StatusBadRequest)
 		return
@@ -58,11 +67,19 @@ func (s *Server) handleWebSocketTunnel(w http.ResponseWriter, r *http.Request) {
 		s.logger.Printf("websocket accept route=%s error=%v", route.ID, err)
 		return
 	}
+	if tcpConn, ok := bridge.conn.(*net.TCPConn); ok {
+		raw, err := tcpConn.SyscallConn()
+		if err == nil {
+			_ = raw.Control(func(fd uintptr) {
+				applyTCPSocketOptions(fd, route.QoS)
+			})
+		}
+	}
 	bridge.idleTimeout = route.IdleTimeout()
 	defer bridge.conn.Close()
 
 	if route.Protocol == ProtocolUDP {
-		upstream, err := dialUDP(route)
+		upstream, err := s.dialUDP(route)
 		if err != nil {
 			_ = bridge.writeClose()
 			s.logger.Printf("websocket udp dial route=%s error=%v", route.ID, err)
@@ -92,12 +109,14 @@ func (s *Server) bridgeWebSocketToTCP(route *Route, bridge *webSocketBridge, ups
 	errCh := make(chan error, 2)
 
 	go func() {
-		buf := make([]byte, 32*1024)
+		buf := getCopyBuf()
+		defer putCopyBuf(buf)
+		buffer := *buf
 		for {
 			_ = upstream.SetReadDeadline(time.Now().Add(route.IdleTimeout()))
-			n, err := upstream.Read(buf)
+			n, err := upstream.Read(buffer)
 			if n > 0 {
-				if writeErr := bridge.writeBinary(buf[:n]); writeErr != nil {
+				if writeErr := bridge.writeBinary(buffer[:n]); writeErr != nil {
 					errCh <- writeErr
 					return
 				}
@@ -127,6 +146,8 @@ func (s *Server) bridgeWebSocketToTCP(route *Route, bridge *webSocketBridge, ups
 	}()
 
 	err := <-errCh
+	// Drain second error to prevent goroutine leak
+	<-errCh
 	if err != nil && !errors.Is(err, io.EOF) {
 		s.logger.Printf("websocket tunnel route=%s closed=%v", route.ID, err)
 	}
@@ -137,11 +158,13 @@ func (s *Server) bridgeWebSocketToUDP(route *Route, bridge *webSocketBridge, ups
 	errCh := make(chan error, 2)
 
 	go func() {
-		buf := make([]byte, maxUDPPacketSize)
+		buf := getUDPBuf()
+		defer putUDPBuf(buf)
+		buffer := *buf
 		for {
-			n, err := upstream.Read(buf)
+			n, err := upstream.Read(buffer)
 			if n > 0 {
-				if writeErr := bridge.writeBinary(buf[:n]); writeErr != nil {
+				if writeErr := bridge.writeBinary(buffer[:n]); writeErr != nil {
 					errCh <- writeErr
 					return
 				}
@@ -174,6 +197,8 @@ func (s *Server) bridgeWebSocketToUDP(route *Route, bridge *webSocketBridge, ups
 	}()
 
 	err := <-errCh
+	// Drain second error to prevent goroutine leak
+	<-errCh
 	if err != nil && !errors.Is(err, io.EOF) {
 		s.logger.Printf("websocket udp tunnel route=%s closed=%v", route.ID, err)
 	}
@@ -383,11 +408,23 @@ func (b *webSocketBridge) readFrame() (bool, byte, []byte, error) {
 		return false, 0, nil, err
 	}
 
-	for i := range payload {
-		payload[i] ^= mask[i%4]
-	}
+	unmask(payload, mask)
 
 	return fin, opcode, payload, nil
+}
+
+func unmask(payload []byte, mask [4]byte) {
+	if len(payload) == 0 {
+		return
+	}
+	m32 := binary.LittleEndian.Uint32(mask[:])
+	i := 0
+	for ; i <= len(payload)-4; i += 4 {
+		binary.LittleEndian.PutUint32(payload[i:], binary.LittleEndian.Uint32(payload[i:])^m32)
+	}
+	for ; i < len(payload); i++ {
+		payload[i] ^= mask[i%4]
+	}
 }
 
 func (b *webSocketBridge) writeBinary(payload []byte) error {

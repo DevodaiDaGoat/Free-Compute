@@ -1,0 +1,147 @@
+{
+  "gateway": {
+    "cdnHostname": "${FREECOMPUTE_CDN_HOSTNAME:-freecompute.b-cdn.net}",
+    "edgeHostname": "${FREECOMPUTE_EDGE_HOSTNAME:-edge.freecompute.b-cdn.net}",
+    "apiHostname": "${FREECOMPUTE_API_HOSTNAME:-api.freecompute.b-cdn.net}",
+    "staticHostname": "${FREECOMPUTE_STATIC_HOSTNAME:-static.freecompute.b-cdn.net}",
+    "webrtcHostname": "${FREECOMPUTE_WEBRTC_HOSTNAME:-webrtc.freecompute.b-cdn.net}"
+  },
+  "cacheRules": {
+    "staticAssets": {
+      "enabled": true,
+      "ttl": 31536000,
+      "edgeRules": [
+        {
+          "action": "cache",
+          "pattern": "*.js",
+          "ttl": 31536000
+        },
+        {
+          "action": "cache",
+          "pattern": "*.css",
+          "ttl": 31536000
+        },
+        {
+          "action": "cache",
+          "pattern": "*.png",
+          "ttl": 31536000
+        },
+        {
+          "action": "cache",
+          "pattern": "*.jpg",
+          "ttl": 31536000
+        },
+        {
+          "action": "cache",
+          "pattern": "*.svg",
+          "ttl": 31536000
+        },
+        {
+          "action": "cache",
+          "pattern": "*.woff2",
+          "ttl": 31536000
+        }
+      ]
+    },
+    "apiEndpoints": {
+      "enabled": false,
+      "bypassPaths": [
+        "/api/*",
+        "/sessions/*",
+        "/webrtc/*",
+        "/gaming/*",
+        "/input/*",
+        "/audio/*",
+        "/transfer/*",
+        "/clipboard/*"
+      ]
+    },
+    "streamingEndpoints": {
+      "enabled": false,
+      "bypassPaths": [
+        "/signal/*",
+        "/proxy/*",
+        "/ws/*",
+        "/connect/*",
+        "/agent/*"
+      ]
+    }
+  },
+  "edgeRules": [
+    {
+      "name": "Disable Buffering for WebRTC",
+      "condition": {
+        "pathPattern": "/signal/*"
+      },
+      "action": {
+        "type": "disableBuffering"
+      }
+    },
+    {
+      "name": "Preserve WebSocket Upgrade Headers",
+      "condition": {
+        "pathPattern": "/ws/*"
+      },
+      "action": {
+        "type": "preserveHeaders",
+        "headers": ["Upgrade", "Connection", "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Protocol"]
+      }
+    },
+    {
+      "name": "Nearest Region Routing for Signaling",
+      "condition": {
+        "pathPattern": "/signal/*"
+      },
+      "action": {
+        "type": "nearestRegion"
+      }
+    },
+    {
+      "name": "Short-lived Connection Tokens",
+      "condition": {
+        "pathPattern": "/sessions/*"
+      },
+      "action": {
+        "type": "shortLivedTokens",
+        "ttl": 300
+      }
+    }
+  ],
+  "performance": {
+    "http2": true,
+    "http3": true,
+    "compression": {
+      "enabled": true,
+      "types": ["gzip", "brotli"],
+      "level": 6
+    },
+    "tls": {
+      "minVersion": "1.2",
+      "maxVersion": "1.3",
+      "ciphers": [
+        "TLS_AES_128_GCM_SHA256",
+        "TLS_AES_256_GCM_SHA384",
+        "TLS_CHACHA20_POLY1305_SHA256"
+      ]
+    }
+  },
+  "security": {
+    "ddosProtection": true,
+    "rateLimiting": {
+      "enabled": true,
+      "requestsPerSecond": 100,
+      "burst": 200
+    },
+    "cors": {
+      "enabled": true,
+      "allowedOrigins": ["*"],
+      "allowedMethods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      "allowedHeaders": ["Content-Type", "Authorization", "X-Requested-With"]
+    }
+  },
+  "monitoring": {
+    "enabled": true,
+    "realTimeStats": true,
+    "logRetention": 7
+  }
+}

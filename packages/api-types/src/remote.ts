@@ -8,9 +8,13 @@ export type ResourceClass = 'basic' | 'standard' | 'gaming' | 'workstation';
 
 export type StreamPreset = 'safe' | 'fast';
 
+export type EncodingMode = 'speed' | 'quality' | 'balanced';
+
+export type EncoderPreset = 'ultrafast' | 'superfast' | 'veryfast' | 'faster' | 'fast' | 'medium' | 'slow' | 'slower' | 'veryslow' | 'placebo';
+
 export type StreamTransport = 'webrtc' | 'websocket-fallback';
 
-export type VideoCodec = 'h264' | 'h265' | 'av1' | 'vp8' | 'vp9';
+export type VideoCodec = 'h263' | 'h264' | 'h265' | 'av1' | 'vp8' | 'vp9';
 
 export type AudioCodec = 'opus' | 'aac';
 
@@ -51,6 +55,21 @@ export interface StreamResolution {
   refreshRateHz: number;
 }
 
+export interface EncoderConfig {
+  mode: EncodingMode;
+  preset: EncoderPreset;
+  codecProfile?: string;
+  codecLevel?: string;
+  pixelFormat?: string;
+  gopSize?: number;
+  bFrames?: number;
+  refFrames?: number;
+  maxBitrateKbps?: number;
+  crf?: number;
+  qp?: number;
+  hardwareAccel: boolean;
+}
+
 export interface StreamProfile {
   preset: StreamPreset;
   transport: StreamTransport;
@@ -66,6 +85,7 @@ export interface StreamProfile {
   audioEnabled: boolean;
   latencyTargetMs: number;
   keyframeIntervalMs?: number;
+  encoderConfig?: EncoderConfig;
 }
 
 export interface NetworkQualitySnapshot {

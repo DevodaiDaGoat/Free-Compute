@@ -34,3 +34,5 @@ Thumbs.db
 # Coverage
 coverage/
 *.lcov
+.aider*
+/.stoneforge/.worktrees/

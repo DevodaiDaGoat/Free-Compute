@@ -2,6 +2,8 @@ package tunnel
 
 import (
 	"net/http"
+
+	"github.com/freecompute/free-compute/apps/gateway/internal/auth"
 )
 
 func (s *Server) handleAgentTunnel(w http.ResponseWriter, r *http.Request) {
@@ -13,6 +15,13 @@ func (s *Server) handleAgentTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.authorize(route, w, r) {
 		return
+	}
+	if user := auth.UserFromContext(r); user != nil {
+		if !s.incrementUserConns(user.ID) {
+			s.writeConnLimitReached(w, route.ID)
+			return
+		}
+		defer s.decrementUserConns(user.ID)
 	}
 	if !route.UsesAgentTunnel() {
 		http.Error(w, "route is not configured for agent tunneling", http.StatusBadRequest)
