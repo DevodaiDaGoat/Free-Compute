@@ -1,0 +1,107 @@
+services:
+  gateway:
+    build:
+      context: ./apps/gateway
+      dockerfile: ../../Dockerfile.gateway
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    environment:
+      FREECOMPUTE_GATEWAY_ADDR: ":8080"
+      FREECOMPUTE_TUNNEL_TOKEN: "${FREECOMPUTE_TUNNEL_TOKEN:-dev-token}"
+      FREECOMPUTE_TUNNEL_ROUTES: '${FREECOMPUTE_TUNNEL_ROUTES}'
+      FREECOMPUTE_GATEWAY_SHUTDOWN_SECONDS: "5"
+      FREECOMPUTE_TUNNEL_DIAL_SECONDS: "3"
+      FREECOMPUTE_TUNNEL_AGENT_WAIT_SECONDS: "5"
+      FREECOMPUTE_GATEWAY_READ_HEADER_SECONDS: "3"
+      FREECOMPUTE_GATEWAY_IDLE_SECONDS: "60"
+      FREECOMPUTE_PROXY_UPSTREAM_IDLE_SECONDS: "30"
+      FREECOMPUTE_PROXY_RESPONSE_HEADER_SECONDS: "5"
+      FREECOMPUTE_PROXY_EXPECT_CONTINUE_SECONDS: "1"
+      FREECOMPUTE_PROXY_MAX_IDLE_CONNS: "2048"
+      FREECOMPUTE_PROXY_MAX_IDLE_CONNS_PER_HOST: "256"
+      FREECOMPUTE_PROXY_FLUSH_MS: "-1"
+      FREECOMPUTE_DB_PATH: "/tmp/freecompute.db"
+      FREECOMPUTE_TCP_BUFFER_SIZE: "2097152"
+      FREECOMPUTE_UDP_BUFFER_SIZE: "4194304"
+      FREECOMPUTE_MODERATION_LLM_URL: "${FREECOMPUTE_MODERATION_LLM_URL:-}"
+      FREECOMPUTE_MODERATION_LLM_KEY: "${FREECOMPUTE_MODERATION_LLM_KEY:-}"
+      FREECOMPUTE_DNS_TTL_SECONDS: "300"
+      FREECOMPUTE_DNS_MAX_ENTRIES: "1024"
+      FREECOMPUTE_RATE_LIMIT_RPM: "2000"
+      FREECOMPUTE_MAX_CONNS_PER_USER: "100"
+      FREECOMPUTE_DEFAULT_BROWSING_MODE: "casual"
+      FREECOMPUTE_ADMIN_EMAIL: "${FREECOMPUTE_ADMIN_EMAIL:-admin}"
+      FREECOMPUTE_ADMIN_ROLE: "${FREECOMPUTE_ADMIN_ROLE:-admin}"
+      FREECOMPUTE_CDN_HOSTNAME: "${FREECOMPUTE_CDN_HOSTNAME:-cdn.freecompute.io}"
+      FREECOMPUTE_EDGE_HOSTNAME: "${FREECOMPUTE_EDGE_HOSTNAME:-edge.freecompute.io}"
+      FREECOMPUTE_API_HOSTNAME: "${FREECOMPUTE_API_HOSTNAME:-api.freecompute.io}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - freecompute
+
+  host-agent:
+    build:
+      context: ./host-agent
+      dockerfile: ../Dockerfile.host-agent
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      FREECOMPUTE_AGENT_GATEWAY_URL: "http://gateway:8080"
+      FREECOMPUTE_AGENT_TOKEN: "${FREECOMPUTE_TUNNEL_TOKEN:-dev-token}"
+      FREECOMPUTE_AGENT_ROUTES: '${FREECOMPUTE_AGENT_ROUTES:-[{"id":"vm-ssh","target":"localhost:22"},{"id":"vm-tcp","target":"localhost:8082"}]}'
+      FREECOMPUTE_AGENT_DIAL_SECONDS: "5"
+      FREECOMPUTE_AGENT_RECONNECT_SECONDS: "1"
+    networks:
+      - freecompute
+
+  vm-agent:
+    build:
+      context: ./host-agent
+      dockerfile: ../Dockerfile.vm-setup
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      FREECOMPUTE_GATEWAY_URL: "http://gateway:8080"
+      FREECOMPUTE_AGENT_TOKEN: "${FREECOMPUTE_TUNNEL_TOKEN:-dev-token}"
+      FREECOMPUTE_VM_ID: "${FREECOMPUTE_VM_ID:-vm-test-001}"
+      FREECOMPUTE_VM_REGION: "${FREECOMPUTE_VM_REGION:-us-east-1}"
+      FREECOMPUTE_VM_GPU_ENABLED: "${FREECOMPUTE_VM_GPU_ENABLED:-true}"
+      FREECOMPUTE_VM_GPU_MODEL: "${FREECOMPUTE_VM_GPU_MODEL:-}"
+      FREECOMPUTE_VM_GPU_VRAM: "${FREECOMPUTE_VM_GPU_VRAM:-0}"
+      FREECOMPUTE_VM_CPUCORES: "${FREECOMPUTE_VM_CPUCORES:-8}"
+      FREECOMPUTE_VM_RAMGB: "${FREECOMPUTE_VM_RAMGB:-32}"
+      FREECOMPUTE_VM_STORAGEGB: "${FREECOMPUTE_VM_STORAGEGB:-500}"
+      FREECOMPUTE_VM_ENABLE_WEBRTC: "${FREECOMPUTE_VM_ENABLE_WEBRTC:-true}"
+      FREECOMPUTE_VM_ENABLE_GAMING: "${FREECOMPUTE_VM_ENABLE_GAMING:-true}"
+      FREECOMPUTE_VM_ENABLE_REMOTE_SUPPORT: "${FREECOMPUTE_VM_ENABLE_REMOTE_SUPPORT:-true}"
+      FREECOMPUTE_VM_AUDIO: "${FREECOMPUTE_VM_AUDIO:-true}"
+      FREECOMPUTE_VM_DISPLAY_PORT: "${FREECOMPUTE_VM_DISPLAY_PORT:-0}"
+      FREECOMPUTE_VM_ROUTES: '${FREECOMPUTE_VM_ROUTES:-[{"id":"desktop-ssh","protocol":"ssh","target":"127.0.0.1","port":22,"poolSize":4},{"id":"desktop-http","protocol":"http","target":"127.0.0.1","port":8080,"poolSize":2}]}'
+    networks:
+      - freecompute
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks:
+      - freecompute
+
+networks:
+  freecompute:
+    driver: bridge

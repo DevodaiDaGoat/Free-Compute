@@ -40,6 +40,9 @@ const fallbackCapabilities: UniversalProxyCapabilities = {
   },
   routeModes: ['edge-relay', 'direct-p2p', 'host-tunnel'],
   bunnyCdn: {
+    hostname: process.env.FREECOMPUTE_CDN_HOSTNAME || 'freecompute.b-cdn.net',
+    edgeHost: process.env.FREECOMPUTE_EDGE_HOSTNAME || 'edge.freecompute.b-cdn.net',
+    apiHost: process.env.FREECOMPUTE_API_HOSTNAME || 'api.freecompute.b-cdn.net',
     cacheable: ['static frontend assets', 'immutable WebOS assets', 'relay discovery documents'],
     bypassCache: ['/proxy/*', '/ws/*', '/connect/*', '/agent/*', '/signal/*'],
     supportsAcceleration: true,

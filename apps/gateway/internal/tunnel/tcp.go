@@ -8,15 +8,21 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/freecompute/free-compute/apps/gateway/internal/auth"
 )
 
 func (s *Server) serveTCP(ctx context.Context, route *Route) error {
-	listenConfig := net.ListenConfig{KeepAlive: 30 * time.Second}
+	listenConfig := net.ListenConfig{KeepAlive: 5 * time.Second}
 	listener, err := listenConfig.Listen(ctx, "tcp", route.Listen)
 	if err != nil {
 		return fmt.Errorf("listen tcp route=%s addr=%s: %w", route.ID, route.Listen, err)
 	}
 	defer listener.Close()
+
+	if tcpListener, ok := listener.(*net.TCPListener); ok {
+		_ = applyTCPListenerOptions(tcpListener, route.QoS)
+	}
 
 	s.logger.Printf("tcp tunnel route=%s listening=%s target=%s", route.ID, route.Listen, route.Target)
 
@@ -48,6 +54,13 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(route, w, r) {
 		return
 	}
+	if user := auth.UserFromContext(r); user != nil {
+		if !s.incrementUserConns(user.ID) {
+			s.writeConnLimitReached(w, route.ID)
+			return
+		}
+		defer s.decrementUserConns(user.ID)
+	}
 	if route.Protocol != ProtocolTCP && route.Protocol != ProtocolSSH {
 		http.Error(w, "route does not support CONNECT tunneling", http.StatusBadRequest)
 		return
@@ -69,7 +82,16 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstream, cleanup, err := s.openTCP(context.Background(), route)
+	if tcpConn, ok := client.(*net.TCPConn); ok {
+		raw, err := tcpConn.SyscallConn()
+		if err == nil {
+			_ = raw.Control(func(fd uintptr) {
+				applyTCPSocketOptions(fd, route.QoS)
+			})
+		}
+	}
+
+	upstream, cleanup, err := s.openTCP(r.Context(), route)
 	if err != nil {
 		_, _ = client.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		_ = client.Close()
@@ -78,7 +100,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, _ = client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-	s.bridgeTCP(context.Background(), route, client, upstream, rw.Reader, cleanup)
+	s.bridgeTCP(r.Context(), route, client, upstream, rw.Reader, cleanup)
 }
 
 func (s *Server) relayTCP(ctx context.Context, route *Route, client net.Conn) {
@@ -95,7 +117,7 @@ func (s *Server) relayTCP(ctx context.Context, route *Route, client net.Conn) {
 func (s *Server) dialTCP(ctx context.Context, route *Route) (net.Conn, error) {
 	dialer := net.Dialer{
 		Timeout:   s.cfg.DialTimeout,
-		KeepAlive: 30 * time.Second,
+		KeepAlive: 5 * time.Second,
 	}
 
 	conn, err := dialer.DialContext(ctx, "tcp", route.Target)
@@ -105,7 +127,7 @@ func (s *Server) dialTCP(ctx context.Context, route *Route) (net.Conn, error) {
 
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)
-		_ = tcpConn.SetKeepAlive(true)
+		_ = setTCPKeepaliveAggressive(tcpConn)
 	}
 
 	return conn, nil
@@ -113,6 +135,11 @@ func (s *Server) dialTCP(ctx context.Context, route *Route) (net.Conn, error) {
 
 func (s *Server) openTCP(ctx context.Context, route *Route) (net.Conn, func(), error) {
 	if route.UsesAgentTunnel() {
+		tsConn, tsErr := s.dialViaTailscale(ctx, route)
+		if tsErr == nil {
+			return tsConn, func() {}, nil
+		}
+
 		waitCtx, cancel := context.WithTimeout(ctx, s.agentWaitTimeout())
 		defer cancel()
 
@@ -139,7 +166,7 @@ func (s *Server) bridgeTCP(ctx context.Context, route *Route, client net.Conn, u
 
 	if tcpConn, ok := client.(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)
-		_ = tcpConn.SetKeepAlive(true)
+		_ = setTCPKeepaliveAggressive(tcpConn)
 	}
 
 	errCh := make(chan error, 2)
@@ -158,6 +185,11 @@ func (s *Server) bridgeTCP(ctx context.Context, route *Route, client net.Conn, u
 	case <-ctx.Done():
 	case <-errCh:
 	}
+	// Drain second error to prevent goroutine leak
+	select {
+	case <-errCh:
+	default:
+	}
 }
 
 func (s *Server) agentWaitTimeout() time.Duration {
@@ -172,7 +204,9 @@ func (s *Server) agentWaitTimeout() time.Duration {
 }
 
 func copyConnWithIdle(errCh chan<- error, dst net.Conn, src net.Conn, idleTimeout time.Duration) {
-	buffer := make([]byte, 32*1024)
+	buf := getCopyBuf()
+	defer putCopyBuf(buf)
+	buffer := *buf
 	var err error
 
 	for {

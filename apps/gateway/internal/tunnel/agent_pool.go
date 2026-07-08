@@ -1,19 +1,24 @@
 package tunnel
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"net"
 	"sync"
-	"time"
 )
 
-var errNoAgentTunnel = errors.New("no agent tunnel available")
+var (
+	errNoAgentTunnel = errors.New("no agent tunnel available")
+	errTCPConnClosing = errors.New("tcp connection closing")
+	errTCPConnDead    = errors.New("tcp connection appears dead (unacked + lost)")
+)
 
 type pooledAgentConn struct {
-	conn net.Conn
-	done chan struct{}
-	once sync.Once
+	conn  net.Conn
+	done  chan struct{}
+	once  sync.Once
+	route string
 }
 
 func (c *pooledAgentConn) finish() {
@@ -22,47 +27,50 @@ func (c *pooledAgentConn) finish() {
 	})
 }
 
-type prefetchedConn struct {
-	net.Conn
-	prefix []byte
-}
-
 type agentPool struct {
 	mu      sync.Mutex
-	idle    map[string][]*pooledAgentConn
-	waiters map[string][]chan *pooledAgentConn
+	idle    map[string]*list.List
+	waiters map[string]map[chan *pooledAgentConn]struct{}
 }
 
 func newAgentPool() *agentPool {
 	return &agentPool{
-		idle:    map[string][]*pooledAgentConn{},
-		waiters: map[string][]chan *pooledAgentConn{},
+		idle:    map[string]*list.List{},
+		waiters: map[string]map[chan *pooledAgentConn]struct{}{},
 	}
 }
 
 func (p *agentPool) add(ctx context.Context, routeID string, conn net.Conn) (<-chan struct{}, error) {
 	agentConn := &pooledAgentConn{
-		conn: conn,
-		done: make(chan struct{}),
+		conn:  conn,
+		done:  make(chan struct{}),
+		route: routeID,
 	}
 
 	p.mu.Lock()
 	if waiters := p.waiters[routeID]; len(waiters) > 0 {
-		waiter := waiters[0]
-		p.waiters[routeID] = waiters[1:]
-		p.mu.Unlock()
-		waiter <- agentConn
-		close(waiter)
-		return agentConn.done, nil
+		for waiter := range waiters {
+			delete(waiters, waiter)
+			p.mu.Unlock()
+			waiter <- agentConn
+			close(waiter)
+			return agentConn.done, nil
+		}
 	}
 
-	p.idle[routeID] = append(p.idle[routeID], agentConn)
+	l, ok := p.idle[routeID]
+	if !ok {
+		l = list.New()
+		p.idle[routeID] = l
+	}
+	l.PushBack(agentConn)
 	p.mu.Unlock()
 
 	go func() {
 		<-ctx.Done()
-		p.removeIdle(routeID, agentConn)
-		_ = conn.Close()
+		if p.removeIdle(agentConn) {
+			_ = conn.Close()
+		}
 	}()
 
 	return agentConn.done, nil
@@ -71,9 +79,10 @@ func (p *agentPool) add(ctx context.Context, routeID string, conn net.Conn) (<-c
 func (p *agentPool) take(ctx context.Context, routeID string) (net.Conn, func(), error) {
 	for {
 		p.mu.Lock()
-		if idle := p.idle[routeID]; len(idle) > 0 {
-			agentConn := idle[0]
-			p.idle[routeID] = idle[1:]
+		if l, ok := p.idle[routeID]; ok && l.Len() > 0 {
+			e := l.Front()
+			l.Remove(e)
+			agentConn := e.Value.(*pooledAgentConn)
 			p.mu.Unlock()
 
 			conn, err := liveAgentConn(agentConn.conn)
@@ -87,7 +96,12 @@ func (p *agentPool) take(ctx context.Context, routeID string) (net.Conn, func(),
 		}
 
 		waiter := make(chan *pooledAgentConn, 1)
-		p.waiters[routeID] = append(p.waiters[routeID], waiter)
+		waiters := p.waiters[routeID]
+		if waiters == nil {
+			waiters = make(map[chan *pooledAgentConn]struct{})
+			p.waiters[routeID] = waiters
+		}
+		waiters[waiter] = struct{}{}
 		p.mu.Unlock()
 
 		select {
@@ -109,60 +123,36 @@ func (p *agentPool) take(ctx context.Context, routeID string) (net.Conn, func(),
 	}
 }
 
-func liveAgentConn(conn net.Conn) (net.Conn, error) {
-	if err := conn.SetReadDeadline(time.Now()); err != nil {
-		return nil, err
-	}
-
-	var first [1]byte
-	n, err := conn.Read(first[:])
-	_ = conn.SetReadDeadline(time.Time{})
-	if n > 0 {
-		return &prefetchedConn{Conn: conn, prefix: first[:n]}, nil
-	}
-	if err == nil {
-		return conn, nil
-	}
-	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-		return conn, nil
-	}
-
-	return nil, err
-}
-
-func (c *prefetchedConn) Read(p []byte) (int, error) {
-	if len(c.prefix) == 0 {
-		return c.Conn.Read(p)
-	}
-
-	n := copy(p, c.prefix)
-	c.prefix = c.prefix[n:]
-	return n, nil
-}
-
-func (p *agentPool) removeIdle(routeID string, target *pooledAgentConn) {
+func (p *agentPool) removeIdle(target *pooledAgentConn) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	idle := p.idle[routeID]
-	for i, agentConn := range idle {
-		if agentConn == target {
-			p.idle[routeID] = append(idle[:i], idle[i+1:]...)
-			return
+	l, ok := p.idle[target.route]
+	if !ok {
+		return false
+	}
+	for e := l.Front(); e != nil; e = e.Next() {
+		if e.Value.(*pooledAgentConn) == target {
+			l.Remove(e)
+			if l.Len() == 0 {
+				delete(p.idle, target.route)
+			}
+			return true
 		}
 	}
+	return false
 }
 
 func (p *agentPool) removeWaiter(routeID string, target chan *pooledAgentConn) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	waiters := p.waiters[routeID]
-	for i, waiter := range waiters {
-		if waiter == target {
-			p.waiters[routeID] = append(waiters[:i], waiters[i+1:]...)
-			close(waiter)
-			return
+	if waiters, ok := p.waiters[routeID]; ok {
+		if _, exists := waiters[target]; exists {
+			delete(waiters, target)
+			if len(waiters) == 0 {
+				delete(p.waiters, routeID)
+			}
 		}
 	}
 }

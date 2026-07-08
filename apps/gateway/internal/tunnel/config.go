@@ -22,9 +22,17 @@ const (
 	defaultUpstreamIdleSeconds    = 90
 	defaultResponseHeaderSeconds  = 10
 	defaultExpectContinueSeconds  = 1
-	defaultMaxIdleConns           = 1024
-	defaultMaxIdleConnsPerHost    = 128
-	defaultProxyFlushMilliseconds = -1
+	defaultMaxIdleConns           = 8192
+	defaultMaxIdleConnsPerHost    = 1024
+	defaultProxyFlushMilliseconds = 5
+	defaultQualityEWMAAlpha       = 0.3
+	defaultQualityGoodRTTMs       = 30.0
+	defaultQualityFairRTTMs       = 100.0
+	defaultQualityGoodLossRatio   = 0.01
+	defaultQualityFairLossRatio   = 0.05
+	defaultQualityGoodJitterMs    = 15.0
+	defaultQualityFairJitterMs    = 40.0
+	defaultQualityMinBandwidthBps = 100_000
 	agentTarget                   = "agent"
 )
 
@@ -56,18 +64,76 @@ type Config struct {
 	MaxIdleConns          int
 	MaxIdleConnsPerHost   int
 	ProxyFlushInterval    time.Duration
+	CDNHostname           string
+	EdgeHostname          string
+	APIHostname           string
+	QUICAddr              string
+	MeshPeers             []string
+	QoSConfig             QoSConfig
+	Quality               QualityConfig
+	TCPCCAlgo             string
+	TCPBufferSize         int
+	UDPBufferSize         int
+	EnableCompression     bool
+	EnableProxyCache      bool
+	MaxProxyCacheMB       int
+	EnableSessionReplay   bool
+	EnableSpeedTest       bool
+	RecordingDir          string
+	DBPath                string
+	ModerationLLMURL      string
+	ModerationLLMKey      string
+	DefaultBrowsingMode   string
+	DNSTTLSeconds         int
+	DNSMaxEntries         int
+	TCPFastOpen           int
+	TCPDeferAccept        int
+	HTTPReadBuffer        int
+	HTTPWriteBuffer       int
+	RateLimitRPM          int
+	MaxConnsPerUser       int
 }
 
 type RouteConfig struct {
-	ID                 string   `json:"id"`
-	Protocol           Protocol `json:"protocol"`
-	Listen             string   `json:"listen,omitempty"`
-	Target             string   `json:"target,omitempty"`
-	IdleTimeoutSeconds int      `json:"idleTimeoutSeconds,omitempty"`
-	RequireAuth        *bool    `json:"requireAuth,omitempty"`
+	ID                 string        `json:"id"`
+	Protocol           Protocol      `json:"protocol"`
+	Listen             string        `json:"listen,omitempty"`
+	Target             string        `json:"target,omitempty"`
+	IdleTimeoutSeconds int           `json:"idleTimeoutSeconds,omitempty"`
+	RequireAuth        *bool         `json:"requireAuth,omitempty"`
+	BrowsingMode       string        `json:"browsingMode,omitempty"`
+	Cache              *CacheConfig  `json:"cache,omitempty"`
+	QoS                *QoSConfig    `json:"qos,omitempty"`
+}
+
+type CacheConfig struct {
+	TTLSeconds     int    `json:"ttl_seconds,omitempty"`
+	MaxSizeMB      int    `json:"max_size_mb,omitempty"`
+	CacheControl   string `json:"cache_control,omitempty"`
+}
+
+type QoSConfig struct {
+	DSCP int `json:"dscp,omitempty"`
+}
+
+type QualityConfig struct {
+	EWMAAlpha       float64
+	GoodRTTMs       float64
+	FairRTTMs       float64
+	GoodLossRatio   float64
+	FairLossRatio   float64
+	GoodJitterMs    float64
+	FairJitterMs    float64
+	MinBandwidthBps uint64
 }
 
 func LoadConfigFromEnv() (Config, error) {
+	peersRaw := strings.TrimSpace(os.Getenv("FREECOMPUTE_MESH_PEERS"))
+	var peers []string
+	if peersRaw != "" {
+		peers = strings.Split(peersRaw, ",")
+	}
+
 	cfg := Config{
 		Addr:                  valueOrDefault(os.Getenv("FREECOMPUTE_GATEWAY_ADDR"), defaultGatewayAddr),
 		TunnelToken:           os.Getenv("FREECOMPUTE_TUNNEL_TOKEN"),
@@ -82,6 +148,42 @@ func LoadConfigFromEnv() (Config, error) {
 		MaxIdleConns:          intFromEnv("FREECOMPUTE_PROXY_MAX_IDLE_CONNS", defaultMaxIdleConns),
 		MaxIdleConnsPerHost:   intFromEnv("FREECOMPUTE_PROXY_MAX_IDLE_CONNS_PER_HOST", defaultMaxIdleConnsPerHost),
 		ProxyFlushInterval:    millisecondsFromEnv("FREECOMPUTE_PROXY_FLUSH_MS", defaultProxyFlushMilliseconds),
+		CDNHostname:           valueOrDefault(os.Getenv("FREECOMPUTE_CDN_HOSTNAME"), ""),
+		EdgeHostname:          valueOrDefault(os.Getenv("FREECOMPUTE_EDGE_HOSTNAME"), ""),
+		APIHostname:           valueOrDefault(os.Getenv("FREECOMPUTE_API_HOSTNAME"), ""),
+		QUICAddr:              valueOrDefault(os.Getenv("FREECOMPUTE_GATEWAY_QUIC_ADDR"), ":8084"),
+		MeshPeers:             peers,
+		Quality: QualityConfig{
+			EWMAAlpha:       float64OrDefault(os.Getenv("FREECOMPUTE_QUALITY_EWMA_ALPHA"), defaultQualityEWMAAlpha),
+			GoodRTTMs:       float64OrDefault(os.Getenv("FREECOMPUTE_QUALITY_GOOD_RTT_MS"), defaultQualityGoodRTTMs),
+			FairRTTMs:       float64OrDefault(os.Getenv("FREECOMPUTE_QUALITY_FAIR_RTT_MS"), defaultQualityFairRTTMs),
+			GoodLossRatio:   float64OrDefault(os.Getenv("FREECOMPUTE_QUALITY_GOOD_LOSS_RATIO"), defaultQualityGoodLossRatio),
+			FairLossRatio:   float64OrDefault(os.Getenv("FREECOMPUTE_QUALITY_FAIR_LOSS_RATIO"), defaultQualityFairLossRatio),
+			GoodJitterMs:    float64OrDefault(os.Getenv("FREECOMPUTE_QUALITY_GOOD_JITTER_MS"), defaultQualityGoodJitterMs),
+			FairJitterMs:    float64OrDefault(os.Getenv("FREECOMPUTE_QUALITY_FAIR_JITTER_MS"), defaultQualityFairJitterMs),
+			MinBandwidthBps: uint64(intFromEnv("FREECOMPUTE_QUALITY_MIN_BANDWIDTH_BPS", defaultQualityMinBandwidthBps)),
+		},
+		TCPCCAlgo:             valueOrDefault(os.Getenv("FREECOMPUTE_TCP_CC_ALGO"), "auto"),
+		TCPBufferSize:         intFromEnv("FREECOMPUTE_TCP_BUFFER_SIZE", 8_388_608),
+		UDPBufferSize:         intFromEnv("FREECOMPUTE_UDP_BUFFER_SIZE", 16_777_216),
+		EnableCompression:     LoadCompressionConfig(),
+		EnableProxyCache:      strings.TrimSpace(os.Getenv("FREECOMPUTE_DISABLE_PROXY_CACHE")) == "",
+		MaxProxyCacheMB:       intFromEnv("FREECOMPUTE_PROXY_CACHE_MAX_SIZE_MB", 256),
+		EnableSessionReplay:   strings.TrimSpace(os.Getenv("FREECOMPUTE_ENABLE_SESSION_REPLAY")) != "false",
+		EnableSpeedTest:       strings.TrimSpace(os.Getenv("FREECOMPUTE_ENABLE_SPEED_TEST")) != "false",
+		RecordingDir:          valueOrDefault(os.Getenv("FREECOMPUTE_RECORDING_DIR"), "/tmp/freecompute-recordings"),
+		DBPath:                valueOrDefault(os.Getenv("FREECOMPUTE_DB_PATH"), "/tmp/freecompute.db"),
+		ModerationLLMURL:       valueOrDefault(os.Getenv("FREECOMPUTE_MODERATION_LLM_URL"), ""),
+		ModerationLLMKey:       valueOrDefault(os.Getenv("FREECOMPUTE_MODERATION_LLM_KEY"), ""),
+		DefaultBrowsingMode:    valueOrDefault(strings.ToLower(os.Getenv("FREECOMPUTE_DEFAULT_BROWSING_MODE")), "casual"),
+		DNSTTLSeconds:          intFromEnv("FREECOMPUTE_DNS_TTL_SECONDS", 600),
+		DNSMaxEntries:          intFromEnv("FREECOMPUTE_DNS_MAX_ENTRIES", 4096),
+		TCPFastOpen:            intFromEnv("FREECOMPUTE_TCP_FASTOPEN", 5),
+		TCPDeferAccept:         intFromEnv("FREECOMPUTE_TCP_DEFER_ACCEPT", 5),
+		HTTPReadBuffer:         intFromEnv("FREECOMPUTE_HTTP_READ_BUFFER", 0),
+		HTTPWriteBuffer:        intFromEnv("FREECOMPUTE_HTTP_WRITE_BUFFER", 0),
+		RateLimitRPM:           intFromEnv("FREECOMPUTE_RATE_LIMIT_RPM", 2000),
+		MaxConnsPerUser:        intFromEnv("FREECOMPUTE_MAX_CONNS_PER_USER", 200),
 	}
 
 	rawRoutes := strings.TrimSpace(os.Getenv("FREECOMPUTE_TUNNEL_ROUTES"))
@@ -100,6 +202,17 @@ func LoadConfigFromEnv() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func LoadCompressionConfig() bool {
+	return strings.TrimSpace(os.Getenv("FREECOMPUTE_ENABLE_COMPRESSION")) != "false"
+}
+
+func LoadProxyCacheConfig() (bool, int) {
+	if strings.TrimSpace(os.Getenv("FREECOMPUTE_DISABLE_PROXY_CACHE")) != "" {
+		return false, 0
+	}
+	return true, intFromEnv("FREECOMPUTE_PROXY_CACHE_MAX_SIZE_MB", 256)
 }
 
 func (r RouteConfig) Validate() error {
@@ -200,6 +313,18 @@ func secondsFromEnv(name string, fallback int) time.Duration {
 	}
 
 	return time.Duration(parsed) * time.Second
+}
+
+func float64OrDefault(raw string, fallback float64) float64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(raw, 64)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
 
 func millisecondsFromEnv(name string, fallback int) time.Duration {

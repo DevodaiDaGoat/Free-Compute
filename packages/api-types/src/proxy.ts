@@ -153,6 +153,9 @@ export interface UniversalProxyCapabilities {
   clientPaths: Record<ProxyClientKind, ProxyClientPathSet>;
   routeModes: ProxyRouteMode[];
   bunnyCdn: {
+    hostname?: string;
+    edgeHost?: string;
+    apiHost?: string;
     cacheable: string[];
     bypassCache: string[];
     supportsAcceleration: boolean;

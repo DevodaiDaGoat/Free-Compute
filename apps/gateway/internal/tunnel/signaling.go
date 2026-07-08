@@ -33,12 +33,13 @@ type signalRoom struct {
 }
 
 type signalStore struct {
-	mu          sync.Mutex
-	rooms       map[string]*signalRoom
-	lastCleanup time.Time
+	mu    sync.Mutex
+	rooms map[string]*signalRoom
 }
 
-var signals = signalStore{rooms: map[string]*signalRoom{}}
+func newSignalStore() signalStore {
+	return signalStore{rooms: map[string]*signalRoom{}}
+}
 
 func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
 	routeID, roomID := signalRouteAndRoom(r.URL.Path)
@@ -78,7 +79,7 @@ func (s *Server) handleSignalPoll(w http.ResponseWriter, r *http.Request, routeI
 	defer deadline.Stop()
 
 	for {
-		messages, notify := signals.messagesAfter(roomKey, after)
+		messages, notify := s.signalStore.messagesAfter(roomKey, after)
 		if len(messages) > 0 {
 			writeJSON(w, http.StatusOK, map[string]any{"messages": messages})
 			return
@@ -120,7 +121,7 @@ func (s *Server) handleSignalPost(w http.ResponseWriter, r *http.Request, routeI
 		Payload:   incoming.Payload,
 		CreatedAt: time.Now().UTC(),
 	}
-	message = signals.append(routeID+"/"+roomID, message)
+	message = s.signalStore.append(routeID+"/"+roomID, message)
 	writeJSON(w, http.StatusAccepted, message)
 }
 
@@ -139,7 +140,6 @@ func (s *signalStore) messagesAfter(roomKey string, after int64) ([]SignalMessag
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
-	s.pruneLocked(now)
 	room := s.getOrCreateLocked(roomKey, now)
 	messages := make([]SignalMessage, 0)
 	for _, message := range room.messages {
@@ -156,7 +156,6 @@ func (s *signalStore) append(roomKey string, message SignalMessage) SignalMessag
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
-	s.pruneLocked(now)
 	room := s.getOrCreateLocked(roomKey, now)
 	room.seq++
 	message.Seq = room.seq
@@ -181,18 +180,24 @@ func (s *signalStore) getOrCreateLocked(roomKey string, now time.Time) *signalRo
 	return room
 }
 
-func (s *signalStore) pruneLocked(now time.Time) {
-	if !s.lastCleanup.IsZero() && now.Sub(s.lastCleanup) < signalCleanupInterval {
-		return
+func (s *signalStore) sweepLoop() {
+	ticker := time.NewTicker(signalCleanupInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.sweep()
 	}
-	s.lastCleanup = now
+}
 
+func (s *signalStore) sweep() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
 	for roomKey, room := range s.rooms {
-		if now.Sub(room.updatedAt) <= signalRoomTTL {
-			continue
+		if now.Sub(room.updatedAt) > signalRoomTTL {
+			close(room.notify)
+			delete(s.rooms, roomKey)
 		}
-
-		close(room.notify)
-		delete(s.rooms, roomKey)
 	}
 }

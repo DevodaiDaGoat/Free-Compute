@@ -1,0 +1,12 @@
+FROM golang:1.24-alpine AS builder
+WORKDIR /src
+RUN apk add --no-cache git ca-certificates
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /freecompute-host-agent ./cmd/host-agent
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /freecompute-host-agent /freecompute-host-agent
+ENTRYPOINT ["/freecompute-host-agent"]

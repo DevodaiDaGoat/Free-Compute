@@ -10,8 +10,25 @@ import (
 
 const (
 	maxUDPPacketSize    = 64 * 1024
-	udpSocketBufferSize = 4 * 1024 * 1024
+	udpClientIdleTimeout = 60 * time.Second
+	udpClientSweepInterval = 30 * time.Second
 )
+
+var udpSocketBufferSize = 32 * 1024 * 1024
+
+func SetUDPBufferSize(size int) {
+	if size > 0 {
+		if size > 64*1024*1024 {
+			size = 64 * 1024 * 1024
+		}
+		udpSocketBufferSize = size
+	}
+}
+
+type udpClient struct {
+	conn      *net.UDPConn
+	updatedAt time.Time
+}
 
 func (s *Server) serveUDP(ctx context.Context, route *Route) error {
 	listenAddr, err := net.ResolveUDPAddr("udp", route.Listen)
@@ -26,20 +43,21 @@ func (s *Server) serveUDP(ctx context.Context, route *Route) error {
 	defer listener.Close()
 	_ = listener.SetReadBuffer(udpSocketBufferSize)
 	_ = listener.SetWriteBuffer(udpSocketBufferSize)
+	_ = setUDSocketOptions(listener, route.QoS)
 
 	s.logger.Printf("udp tunnel route=%s listening=%s target=%s", route.ID, route.Listen, route.Target)
+
+	clients := &udpClientMap{
+		clients: make(map[string]*udpClient),
+	}
 
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
 	}()
 
-	type udpClient struct {
-		conn *net.UDPConn
-	}
+	go clients.sweepLoop(ctx)
 
-	clients := map[string]*udpClient{}
-	var clientsMu sync.Mutex
 	buf := make([]byte, maxUDPPacketSize)
 
 	for {
@@ -52,25 +70,22 @@ func (s *Server) serveUDP(ctx context.Context, route *Route) error {
 		}
 
 		key := clientAddr.String()
-		clientsMu.Lock()
-		client := clients[key]
+		client := clients.get(key)
 		if client == nil {
-			upstream, err := dialUDP(route)
+			upstream, err := s.dialUDP(route)
 			if err != nil {
-				clientsMu.Unlock()
 				s.logger.Printf("udp dial route=%s client=%s error=%v", route.ID, key, err)
 				continue
 			}
 
-			client = &udpClient{conn: upstream}
-			clients[key] = client
+			client = &udpClient{conn: upstream, updatedAt: time.Now()}
+			clients.set(key, client)
 			go s.copyUDPToClient(ctx, route, listener, upstream, clientAddr, func() {
-				clientsMu.Lock()
-				delete(clients, key)
-				clientsMu.Unlock()
+				clients.delete(key)
 			})
+		} else {
+			clients.touch(key)
 		}
-		clientsMu.Unlock()
 
 		_ = client.conn.SetWriteDeadline(time.Now().Add(route.IdleTimeout()))
 		if _, err := client.conn.Write(buf[:n]); err != nil {
@@ -79,7 +94,65 @@ func (s *Server) serveUDP(ctx context.Context, route *Route) error {
 	}
 }
 
-func dialUDP(route *Route) (*net.UDPConn, error) {
+type udpClientMap struct {
+	mu      sync.Mutex
+	clients map[string]*udpClient
+}
+
+func (m *udpClientMap) get(key string) *udpClient {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.clients[key]
+}
+
+func (m *udpClientMap) set(key string, client *udpClient) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clients[key] = client
+}
+
+func (m *udpClientMap) touch(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if client, ok := m.clients[key]; ok {
+		client.updatedAt = time.Now()
+	}
+}
+
+func (m *udpClientMap) delete(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.clients, key)
+}
+
+func (m *udpClientMap) sweepLoop(ctx context.Context) {
+	ticker := time.NewTicker(udpClientSweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.sweep()
+		}
+	}
+}
+
+func (m *udpClientMap) sweep() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	for key, client := range m.clients {
+		if now.Sub(client.updatedAt) > udpClientIdleTimeout {
+			client.conn.Close()
+			delete(m.clients, key)
+		}
+	}
+}
+
+func (s *Server) dialUDP(route *Route) (*net.UDPConn, error) {
 	targetAddr, err := net.ResolveUDPAddr("udp", route.Target)
 	if err != nil {
 		return nil, fmt.Errorf("resolve udp target route=%s target=%s: %w", route.ID, route.Target, err)
@@ -91,6 +164,8 @@ func dialUDP(route *Route) (*net.UDPConn, error) {
 	}
 	_ = upstream.SetReadBuffer(udpSocketBufferSize)
 	_ = upstream.SetWriteBuffer(udpSocketBufferSize)
+	_ = upstream.SetReadBuffer(s.cfg.UDPBufferSize)
+	_ = upstream.SetWriteBuffer(s.cfg.UDPBufferSize)
 
 	return upstream, nil
 }
