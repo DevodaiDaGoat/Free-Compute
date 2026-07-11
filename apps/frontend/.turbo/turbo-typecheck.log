@@ -2,3 +2,13 @@
 > @free-compute/frontend@0.1.0 typecheck
 > tsc --noEmit
 
+app/connect/page.tsx(36,7): error TS2741: Property 'created' is missing in type '{ queued: string; provisioning: string; connecting: string; active: string; reconnecting: string; ended: string; expired: string; failed: string; }' but required in type 'Record<SessionState, string>'.
+app/webos/apps/remote-desktop/RemoteDesktop.tsx(38,20): error TS2339: Property 'session' does not exist on type '{}'.
+app/webos/apps/remote-desktop/RemoteDesktop.tsx(39,22): error TS2339: Property 'session' does not exist on type '{}'.
+npm error Lifecycle script `typecheck` failed with error:
+npm error code 2
+npm error path C:\DevodaiDaGoat\Free-Compute\apps\frontend
+npm error workspace @free-compute/frontend@0.1.0
+npm error location C:\DevodaiDaGoat\Free-Compute\apps\frontend
+npm error command failed
+npm error command C:\Windows\system32\cmd.exe /d /s /c tsc --noEmit
