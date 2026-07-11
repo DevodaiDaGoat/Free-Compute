@@ -160,7 +160,7 @@ func TestCleanupRemovesOnlyExpiredTokens(t *testing.T) {
 		t.Fatalf("register keep: %v", err)
 	}
 
-	_, _, err = mgr.Register("remove@example.com", "password123", "Remove")
+	_, tokens2, err := mgr.Register("remove@example.com", "password123", "Remove")
 	if err != nil {
 		t.Fatalf("register remove: %v", err)
 	}
@@ -170,12 +170,8 @@ func TestCleanupRemovesOnlyExpiredTokens(t *testing.T) {
 	}
 
 	mgr.mu.Lock()
-	for _, t := range []string{tokens1.AccessToken} {
-		for _, rt := range []string{} {
-			mgr.tokenExpiry[rt] = time.Now().Add(-1 * time.Hour)
-		}
-		mgr.tokenExpiry[t] = time.Now().Add(24 * time.Hour)
-	}
+	mgr.tokenExpiry[tokens2.AccessToken] = time.Now().Add(-1 * time.Hour)
+	mgr.tokenExpiry[tokens2.RefreshToken] = time.Now().Add(-1 * time.Hour)
 	mgr.mu.Unlock()
 
 	mgr.cleanup()
@@ -185,9 +181,14 @@ func TestCleanupRemovesOnlyExpiredTokens(t *testing.T) {
 		t.Fatalf("valid token was incorrectly cleaned up")
 	}
 
-	_, err = mgr.ValidateToken(tokens1.RefreshToken)
-	if err == ErrInvalidToken {
-		t.Fatalf("valid refresh token was incorrectly cleaned up")
+	_, err = mgr.ValidateToken(tokens2.AccessToken)
+	if err != ErrInvalidToken {
+		t.Fatalf("expired token was not cleaned up")
+	}
+
+	_, err = mgr.ValidateToken(tokens2.RefreshToken)
+	if err != ErrInvalidToken {
+		t.Fatalf("expired refresh token was not cleaned up")
 	}
 }
 

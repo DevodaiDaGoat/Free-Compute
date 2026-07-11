@@ -2,12 +2,10 @@ package database
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"log"
 	"os"
-	"strings"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -178,10 +176,18 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
-	_ = db.Exec("PRAGMA cache_size = -64000")
-	_ = db.Exec("PRAGMA mmap_size = 268435456")
-	_ = db.Exec("PRAGMA synchronous = NORMAL")
-	_ = db.Exec("PRAGMA journal_size_limit = 67108864")
+	if _, err := db.Exec("PRAGMA cache_size = -64000"); err != nil {
+		_ = err
+	}
+	if _, err := db.Exec("PRAGMA mmap_size = 268435456"); err != nil {
+		_ = err
+	}
+	if _, err := db.Exec("PRAGMA synchronous = NORMAL"); err != nil {
+		_ = err
+	}
+	if _, err := db.Exec("PRAGMA journal_size_limit = 67108864"); err != nil {
+		_ = err
+	}
 
 	if _, err := db.Exec("PRAGMA optimize"); err != nil {
 		// Best-effort; ignore errors on older SQLite versions
@@ -1364,12 +1370,4 @@ func (db *DB) ApproveSyncRequest(id, reviewerID string) error {
 	_, err := db.Exec(`UPDATE personalization_sync_requests SET status='approved', reviewer_id=?, updated_at=? WHERE id=?`,
 		reviewerID, now(), id)
 	return err
-}
-
-func init() {
-	var _ = json.Marshal
-}
-
-func initDB() {
-	log.Println("database package initialized")
 }

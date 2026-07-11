@@ -1,7 +1,6 @@
 package tunnel
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -158,6 +157,3 @@ func (h *ReportHandler) Action(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "decision": decision})
 }
-
-// ensure context import is used even if AI triage path changes
-var _ = context.Background

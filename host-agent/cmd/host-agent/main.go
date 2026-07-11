@@ -290,21 +290,6 @@ func connectToGateway(ctx context.Context, cfg Config, route RouteConfig) (net.C
 	return conn, reader, nil
 }
 
-func setTCPKeepaliveAggressive(conn *net.TCPConn) error {
-	raw, err := conn.SyscallConn()
-	if err != nil {
-		return err
-	}
-	return raw.Control(func(fd uintptr) {
-		syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPIDLE, 5)
-		syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPINTVL, 1)
-		syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPCNT, 3)
-		syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_QUICKACK, 1)
-		syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, 1_048_576)
-		syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 1_048_576)
-	})
-}
-
 func dialLocalTarget(ctx context.Context, cfg Config, route RouteConfig) (net.Conn, error) {
 	dialer := net.Dialer{Timeout: cfg.DialTimeout, KeepAlive: 5 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", route.Target)

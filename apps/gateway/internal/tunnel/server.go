@@ -265,11 +265,11 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	mux.HandleFunc("/healthz", server.handleHealth)
 	mux.HandleFunc("/capabilities", server.handleCapabilities)
 	mux.HandleFunc("/routes", auth.RequireAuth(authMgr, server.handleRoutes))
-	mux.Handle("/proxy/", server.rateLimitByIPAndUser(server.handleReverseProxy))
+	mux.Handle("/proxy/", server.rateLimitByIPAndUser(http.HandlerFunc(server.handleReverseProxy)))
 	mux.HandleFunc("/browsing/modes", server.handleBrowsingModes)
-	mux.Handle("/connect/", server.rateLimitByIPAndUser(server.handleConnect))
+	mux.Handle("/connect/", server.rateLimitByIPAndUser(http.HandlerFunc(server.handleConnect)))
 	mux.HandleFunc("/ssh/", server.handleSSHTunnel)
-	mux.Handle("/ws/", server.rateLimitByIPAndUser(server.handleWebSocketTunnel))
+	mux.Handle("/ws/", server.rateLimitByIPAndUser(http.HandlerFunc(server.handleWebSocketTunnel)))
 	mux.HandleFunc("/agent/", server.handleAgentTunnel)
 	mux.HandleFunc("/signal/", server.handleSignal)
 	mux.HandleFunc("/webrtc/", server.handleWebRTC)
@@ -324,8 +324,12 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	mux.HandleFunc("/reports/action", auth.RequireRole(1, authMgr, server.reportHandler.Action))
 
 	// Auth routes
-	mux.Handle("/auth/register", server.rateLimitByIP(server.authHandler.Register))
-	mux.Handle("/auth/login", server.rateLimitByIP(server.authHandler.Login))
+	mux.HandleFunc("/auth/register", func(w http.ResponseWriter, r *http.Request) {
+		server.rateLimitByIP(http.HandlerFunc(server.authHandler.Register)).ServeHTTP(w, r)
+	})
+	mux.HandleFunc("/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		server.rateLimitByIP(http.HandlerFunc(server.authHandler.Login)).ServeHTTP(w, r)
+	})
 	mux.HandleFunc("/auth/profile", auth.RequireAuth(authMgr, server.authHandler.Profile))
 	mux.HandleFunc("/auth/tailscale-ip", auth.RequireAuth(authMgr, server.authHandler.AllocateIP))
 
@@ -395,8 +399,6 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 		Handler:           handler,
 		ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
 		IdleTimeout:       cfg.HTTPIdleTimeout,
-		ReadBufferSize:    256 * 1024,
-		WriteBufferSize:   256 * 1024,
 		MaxHeaderBytes:    1 << 20, // 1MB
 	}
 
