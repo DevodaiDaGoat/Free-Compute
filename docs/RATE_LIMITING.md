@@ -6,7 +6,7 @@ Prevent abuse of gateway proxy/tunnel/signaling surfaces, cap per-user consumpti
 
 | Scope | Mechanism | File |
 |-------|-----------|------|
-| Storage quota per user | `AuthManager.CheckStorageQuota` (100 GB default) | `apps/gateway/internal/auth/auth.go:267` |
+| Storage quota per user | `AuthManager.CheckStorageQuota` (10 GB default) | `apps/gateway/internal/auth/auth.go:267` |
 | Concurrent WebRTC sessions | `sessionLimiter := make(chan struct{}, maxConcurrentSessions)` | `apps/gateway/internal/webrtc/webrtc.go:167` |
 | Resource quotas (CPU/RAM/GPU/Network/Sessions) | `usage.Tracker` in-memory, but not enforced in handlers | `apps/gateway/internal/usage/usage.go:191` `CheckQuota` |
 | Proxy transport tuning | `MaxIdleConns`, `MaxIdleConnsPerHost`, idle/read timeouts | `apps/gateway/internal/tunnel/config.go:135` |

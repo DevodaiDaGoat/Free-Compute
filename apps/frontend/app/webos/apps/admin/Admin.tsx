@@ -217,7 +217,7 @@ export default function AdminApp() {
                   ['Require AI Review', settings.requireAiReview ? 'Enabled' : 'Disabled'],
                   ['Max Sessions', settings.maxConcurrentSessions],
                   ['Session Timeout', `${settings.sessionTimeoutMinutes} min`],
-                  ['Default Storage', formatBytes(107374182400)],
+                  ['Default Storage', formatBytes(10737418240)],
                 ].map(([label, value]) => (
                   <div key={label as string} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #21262d', fontSize: 13 }}>
                     <span style={{ color: '#888' }}>{label}</span>

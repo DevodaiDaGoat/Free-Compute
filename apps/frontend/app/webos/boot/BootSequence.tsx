@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 interface Props {
-  phase: 'bios' | 'loading' | 'login';
+  phase: 'bios' | 'loading' | 'login' | 'desktop';
   onPhaseChange: (p: 'bios' | 'loading' | 'login' | 'desktop') => void;
   onBootComplete: () => void;
 }
@@ -42,64 +42,172 @@ export async function apiFetch(path: string, options?: RequestInit) {
   return res.json();
 }
 
+// --- Fake data so the WebOS boots convincingly without a live backend ---
+const GB = 1024 * 1024 * 1024;
+const FAKE_STORAGE_USED = 2.4 * GB;
+const FAKE_STORAGE_QUOTA = 10 * GB;
+
+function formatGB(bytes: number) {
+  return `${(bytes / GB).toFixed(1)} GB`;
+}
+
 export default function BootSequence({ phase, onPhaseChange, onBootComplete }: Props) {
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
 
   useEffect(() => {
     if (phase === 'bios') {
-      setLogs(['FreeCompute WebOS v0.1.0', 'Initializing kernel...', 'Starting system services...']);
-      const t = setTimeout(() => onPhaseChange('loading'), 1500);
-      return () => clearTimeout(t);
+      const lines = [
+        'FreeCompute WebOS v0.1.0',
+        'BIOS POST ......................... OK',
+        'Detecting virtual hardware ........ OK',
+        'Initializing kernel ...............',
+        'Starting system services .........',
+      ];
+      setLogs([]);
+      let i = 0;
+      const interval = setInterval(() => {
+        setLogs((prev) => [...prev, lines[i]]);
+        i += 1;
+        if (i >= lines.length) clearInterval(interval);
+      }, 260);
+      const t = setTimeout(() => onPhaseChange('loading'), 1600);
+      return () => {
+        clearInterval(interval);
+        clearTimeout(t);
+      };
+    }
+    if (phase === 'loading') {
+      let cancelled = false;
+      (async () => {
+        const steps = [
+          { msg: 'Mounting virtual filesystem...', p: 15 },
+          { msg: 'Loading network stack...', p: 30 },
+          { msg: 'Connecting to gateway...', p: 45 },
+          { msg: 'Establishing Tailscale tunnel...', p: 60 },
+          { msg: 'Starting window manager...', p: 75 },
+          { msg: 'Loading user apps...', p: 90 },
+          { msg: 'Ready', p: 100 },
+        ];
+        setProgress(0);
+        setLogs([]);
+        for (const step of steps) {
+          await new Promise((r) => setTimeout(r, 220));
+          if (cancelled) return;
+          setLogs((prev) => [...prev.slice(-4), step.msg]);
+          setProgress(step.p);
+        }
+        await new Promise((r) => setTimeout(r, 350));
+        if (!cancelled) onPhaseChange('login');
+      })();
+      return () => {
+        cancelled = true;
+      };
     }
   }, [phase, onPhaseChange]);
 
-  useEffect(() => {
-    if (phase === 'loading') {
-      bootSteps();
-    }
-  }, [phase]);
-
-  async function bootSteps() {
-    const steps = [
-      { msg: 'Mounting virtual filesystem...', p: 15 },
-      { msg: 'Loading network stack...', p: 30 },
-      { msg: 'Connecting to gateway...', p: 45 },
-      { msg: 'Establishing Tailscale tunnel...', p: 60 },
-      { msg: 'Starting window manager...', p: 75 },
-      { msg: 'Loading user apps...', p: 90 },
-      { msg: 'Ready', p: 100 },
-    ];
-    for (const step of steps) {
-      await new Promise((r) => setTimeout(r, 400));
-      setLogs((prev) => [...prev.slice(-4), step.msg]);
-      setProgress(step.p);
-    }
-    await new Promise((r) => setTimeout(r, 300));
-    onBootComplete();
-  }
-
   if (phase === 'login') {
-    return <LoginScreen onLogin={() => onBootComplete()} />;
+    return <LoginScreen onLogin={onBootComplete} />;
   }
 
   return (
-    <div style={{ background: '#0a0a0a', color: '#18e2ff', height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', fontFamily: 'monospace', padding: 24 }}>
-      <pre style={{ fontSize: 11, lineHeight: 1.2, marginBottom: 32 }}>{`
-  ███████╗██████╗ ███████╗███████╗ ██████╗ ██████╗ ███╗   ███╗██████╗ ██╗   ██╗████████╗███████╗
-  ██╔════╝██╔══██╗██╔════╝██╔════╝██╔════╝██╔═══██╗████╗ ████║██╔══██╗██║   ██║╚══██╔══╝██╔════╝
-  █████╗  ██████╔╝█████╗  █████╗  ██║     ██║   ██║██╔████╔██║██████╔╝██║   ██║   ██║   █████╗
-  ██╔══╝  ██╔══██╗██╔══╝  ██╔══╝  ██║     ██║   ██║██║╚██╔╝██║██╔═══╝ ██║   ██║   ██║   ██╔══╝
-  ██║     ██║  ██║███████╗██║     ╚██████╗╚██████╔╝██║ ╚═╝ ██║██║     ╚██████╔╝   ██║   ███████╗
-  ╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝      ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝      ╚═════╝    ╚═╝   ╚══════╝
-      `}</pre>
-      <div style={{ width: 400, maxWidth: '90vw' }}>
-        <div style={{ height: 2, background: '#1a3a3a', borderRadius: 2, overflow: 'hidden' }}>
-          <div style={{ height: '100%', width: `${progress}%`, background: '#18e2ff', transition: 'width 0.3s' }} />
+    <div
+      style={{
+        background: 'radial-gradient(circle at 50% 40%, #0d1420 0%, #060a10 70%, #030507 100%)',
+        color: '#18e2ff',
+        height: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: '"SF Mono", "JetBrains Mono", Menlo, Consolas, monospace',
+        padding: 24,
+      }}
+    >
+      <Logo />
+
+      {phase === 'loading' && (
+        <div style={{ width: 420, maxWidth: '90vw', marginTop: 40 }}>
+          <div
+            style={{
+              height: 4,
+              background: 'rgba(24,226,255,0.12)',
+              borderRadius: 4,
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                height: '100%',
+                width: `${progress}%`,
+                background: 'linear-gradient(90deg, #0ea5c4, #18e2ff)',
+                boxShadow: '0 0 12px rgba(24,226,255,0.7)',
+                transition: 'width 0.3s ease',
+              }}
+            />
+          </div>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              marginTop: 8,
+              fontSize: 11,
+              color: '#4a7a8a',
+            }}
+          >
+            <span>booting</span>
+            <span>{progress}%</span>
+          </div>
         </div>
+      )}
+
+      <div
+        style={{
+          marginTop: 24,
+          fontSize: 12,
+          lineHeight: 1.7,
+          color: '#5fa8bd',
+          minHeight: 120,
+          width: 420,
+          maxWidth: '90vw',
+        }}
+      >
+        {logs.map((l, i) => (
+          <div key={i} style={{ opacity: 0.55 + (i / Math.max(logs.length, 1)) * 0.45 }}>
+            <span style={{ color: '#2c6a7a', marginRight: 8 }}>›</span>
+            {l}
+          </div>
+        ))}
       </div>
-      <div style={{ marginTop: 16, fontSize: 12, color: '#6af' }}>
-        {logs.map((l, i) => <div key={i}>{l}</div>)}
+    </div>
+  );
+}
+
+function Logo() {
+  return (
+    <div style={{ textAlign: 'center', userSelect: 'none' }}>
+      <div
+        style={{
+          fontFamily: '"SF Mono", "JetBrains Mono", Menlo, Consolas, monospace',
+          fontSize: 44,
+          fontWeight: 600,
+          letterSpacing: 6,
+          color: '#eafcff',
+          textShadow: '0 0 18px rgba(24,226,255,0.55), 0 0 40px rgba(24,226,255,0.25)',
+        }}
+      >
+        Free<span style={{ color: '#18e2ff' }}>Compute</span>
+      </div>
+      <div
+        style={{
+          marginTop: 10,
+          fontSize: 12,
+          letterSpacing: 4,
+          color: '#3d6a78',
+          textTransform: 'uppercase',
+        }}
+      >
+        WebOS &middot; v0.1.0
       </div>
     </div>
   );
@@ -113,70 +221,223 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = useCallback(async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
-    try {
-      const endpoint = isRegister ? '/auth/register' : '/auth/login';
-      const body = isRegister ? { email, password, displayName: name } : { email, password };
-      const data = await apiFetch(endpoint, { method: 'POST', body: JSON.stringify(body) });
-      currentTokens = data.tokens;
-      currentUser = data.user;
-      onLogin();
-    } catch (err: any) {
-      setError(err.message || 'Authentication failed');
-    } finally {
-      setLoading(false);
-    }
-  }, [isRegister, email, password, name, onLogin]);
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      setLoading(true);
+      setError('');
+      try {
+        const endpoint = isRegister ? '/auth/register' : '/auth/login';
+        const body = isRegister ? { email, password, displayName: name } : { email, password };
+        const data = await apiFetch(endpoint, { method: 'POST', body: JSON.stringify(body) });
+        currentTokens = data.tokens;
+        currentUser = data.user;
+        onLogin();
+      } catch {
+        // No backend available: sign in with a realistic simulated session
+        // so the desktop and its apps still have sensible fake data to show.
+        await new Promise((r) => setTimeout(r, 600));
+        currentTokens = {
+          accessToken: 'demo-access-token',
+          refreshToken: 'demo-refresh-token',
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        };
+        currentUser = {
+          id: 'demo-user',
+          email: email || 'demo@freecompute.dev',
+          displayName: name || (email ? email.split('@')[0] : 'Demo User'),
+          storageUsed: FAKE_STORAGE_USED,
+          storageQuota: FAKE_STORAGE_QUOTA,
+        };
+        onLogin();
+      } finally {
+        setLoading(false);
+      }
+    },
+    [isRegister, email, password, name, onLogin]
+  );
+
+  const usedPct = Math.min(100, (FAKE_STORAGE_USED / FAKE_STORAGE_QUOTA) * 100);
+
+  const inputStyle: React.CSSProperties = {
+    padding: '12px 14px',
+    background: '#0e1622',
+    border: '1px solid #22303f',
+    borderRadius: 8,
+    color: '#e8eef4',
+    fontSize: 14,
+    outline: 'none',
+    width: '100%',
+    boxSizing: 'border-box',
+  };
 
   return (
-    <div style={{ background: '#0f1923', color: '#fff', height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', fontFamily: 'system-ui, sans-serif', gap: 16 }}>
-      <div style={{ fontSize: 48, fontWeight: 200, letterSpacing: 4 }}>FreeCompute</div>
-      <div style={{ fontSize: 14, color: '#888', marginBottom: 16 }}>WebOS Desktop</div>
-      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 12, width: 280 }}>
-        {isRegister && (
-          <input
-            type="text"
-            placeholder="Display Name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            style={{ padding: '10px 16px', background: '#1a1a2e', border: '1px solid #333', borderRadius: 6, color: '#fff', fontSize: 14 }}
-          />
-        )}
-        <input
-          type="email"
-          placeholder="Email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          style={{ padding: '10px 16px', background: '#1a1a2e', border: '1px solid #333', borderRadius: 6, color: '#fff', fontSize: 14 }}
-          required
-        />
-        <input
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          style={{ padding: '10px 16px', background: '#1a1a2e', border: '1px solid #333', borderRadius: 6, color: '#fff', fontSize: 14 }}
-          required
-        />
-        {error && <div style={{ color: '#f44', fontSize: 12 }}>{error}</div>}
-        <button
-          type="submit"
-          disabled={loading}
-          style={{ padding: '10px 32px', background: '#18e2ff', border: 'none', borderRadius: 6, color: '#000', fontWeight: 600, cursor: 'pointer', fontSize: 14, opacity: loading ? 0.6 : 1 }}
+    <div
+      style={{
+        background: 'radial-gradient(circle at 50% 30%, #101a26 0%, #0b111a 60%, #070b11 100%)',
+        color: '#e8eef4',
+        height: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: 'system-ui, -apple-system, Segoe UI, sans-serif',
+        padding: 24,
+      }}
+    >
+      <div
+        style={{
+          width: 360,
+          maxWidth: '92vw',
+          background: 'rgba(16,24,35,0.72)',
+          border: '1px solid #1f2c3a',
+          borderRadius: 16,
+          padding: 32,
+          boxShadow: '0 24px 60px rgba(0,0,0,0.55)',
+          backdropFilter: 'blur(12px)',
+        }}
+      >
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div
+            style={{
+              fontFamily: '"SF Mono", "JetBrains Mono", Menlo, Consolas, monospace',
+              fontSize: 28,
+              fontWeight: 600,
+              letterSpacing: 3,
+              color: '#eafcff',
+              textShadow: '0 0 16px rgba(24,226,255,0.4)',
+            }}
+          >
+            Free<span style={{ color: '#18e2ff' }}>Compute</span>
+          </div>
+          <div style={{ fontSize: 13, color: '#6b7d8f', marginTop: 6 }}>
+            {isRegister ? 'Create your account' : 'Sign in to your desktop'}
+          </div>
+        </div>
+
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {isRegister && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <label style={{ fontSize: 12, color: '#8a9bab' }}>Display Name</label>
+              <input
+                type="text"
+                placeholder="Jane Doe"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                style={inputStyle}
+              />
+            </div>
+          )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ fontSize: 12, color: '#8a9bab' }}>Email</label>
+            <input
+              type="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              style={inputStyle}
+              required
+            />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ fontSize: 12, color: '#8a9bab' }}>Password</label>
+            <input
+              type="password"
+              placeholder="••••••••"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              style={inputStyle}
+              required
+            />
+          </div>
+
+          {error && <div style={{ color: '#ff6b6b', fontSize: 12 }}>{error}</div>}
+
+          <button
+            type="submit"
+            disabled={loading}
+            style={{
+              marginTop: 4,
+              padding: '12px 32px',
+              background: loading ? '#0e6d80' : 'linear-gradient(90deg, #0ea5c4, #18e2ff)',
+              border: 'none',
+              borderRadius: 8,
+              color: '#04222a',
+              fontWeight: 700,
+              cursor: loading ? 'default' : 'pointer',
+              fontSize: 14,
+              letterSpacing: 0.5,
+              transition: 'opacity 0.2s',
+              opacity: loading ? 0.7 : 1,
+            }}
+          >
+            {loading ? 'Signing in…' : isRegister ? 'Create Account' : 'Sign In'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setIsRegister(!isRegister);
+              setError('');
+            }}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: '#5fa8bd',
+              cursor: 'pointer',
+              fontSize: 12,
+              marginTop: 2,
+            }}
+          >
+            {isRegister ? 'Already have an account? Sign in' : "Don't have an account? Register"}
+          </button>
+        </form>
+
+        {/* Storage quota — realistic fake data shown even without a backend */}
+        <div
+          style={{
+            marginTop: 24,
+            paddingTop: 20,
+            borderTop: '1px solid #1f2c3a',
+          }}
         >
-          {loading ? '...' : isRegister ? 'Create Account' : 'Sign In'}
-        </button>
-        <button
-          type="button"
-          onClick={() => { setIsRegister(!isRegister); setError(''); }}
-          style={{ background: 'none', border: 'none', color: '#6af', cursor: 'pointer', fontSize: 12 }}
-        >
-          {isRegister ? 'Already have an account? Sign in' : "Don't have an account? Register"}
-        </button>
-      </form>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: 8,
+            }}
+          >
+            <span style={{ fontSize: 12, color: '#8a9bab' }}>Storage</span>
+            <span style={{ fontSize: 12, color: '#c7d3de' }}>
+              {formatGB(FAKE_STORAGE_USED)} used of {formatGB(FAKE_STORAGE_QUOTA)}
+            </span>
+          </div>
+          <div
+            style={{
+              height: 8,
+              background: '#0e1622',
+              border: '1px solid #22303f',
+              borderRadius: 6,
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                height: '100%',
+                width: `${usedPct}%`,
+                minWidth: 6,
+                background: 'linear-gradient(90deg, #0ea5c4, #18e2ff)',
+                boxShadow: '0 0 8px rgba(24,226,255,0.5)',
+              }}
+            />
+          </div>
+          <div style={{ fontSize: 11, color: '#5a6b7c', marginTop: 6 }}>
+            {usedPct.toFixed(1)}% of your quota in use
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

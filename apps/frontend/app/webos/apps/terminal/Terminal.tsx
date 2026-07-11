@@ -1,204 +1,58 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { apiFetch, getGatewayUrl, getTokens } from '../../boot/BootSequence';
+import { apiFetch, getGatewayUrl, getTokens, getUser } from '../../boot/BootSequence';
 
-export default function TerminalApp() {
-  const [input, setInput] = useState('');
-  const [history, setHistory] = useState<string[]>([
-    'FreeCompute WebOS Terminal v0.1.0',
-    'Type "help" for available commands.',
-    '',
-  ]);
-  const [currentPath, setCurrentPath] = useState('~');
-  const [env, setEnv] = useState<Record<string, string>>({});
-  const inputRef = useRef<HTMLInputElement>(null);
+const C = {
+  bg: '#0a0e14',
+  text: '#b3b1ad',
+  prompt: '#98c379',
+  error: '#e06c75',
+  info: '#61afef',
+};
 
-  useEffect(() => {
-    inputRef.current?.focus();
-    const handler = () => inputRef.current?.focus();
-    window.addEventListener('click', handler);
-    return () => window.removeEventListener('click', handler);
-  }, []);
+const FONT = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
 
-  const executeCommand = useCallback(async (cmd: string) => {
-    const tokens = getTokens();
-    const parts = cmd.trim().split(/\s+/);
-    const command = parts[0].toLowerCase();
-    const args = parts.slice(1);
+const HOME = '/home/user';
 
-    switch (command) {
-      case 'help':
-        return [
-          'Available commands:',
-          '  help              - Show this help',
-          '  echo <text>       - Print text',
-          '  clear             - Clear terminal',
-          '  date              - Show current date/time',
-          '  whoami            - Show current user',
-          '  tailscale         - Show Tailscale status',
-          '  webrtc            - Test WebRTC connection',
-          '  gateway           - Show gateway status',
-          '  proxy <url>       - Test proxy connection',
-          '  ssh <host>        - SSH tunnel (via WebSocket)',
-          '  ls                - List files (cloud drive)',
-          '  cat <file>        - Read file from drive',
-          '  storage           - Show storage quota',
-          '  devices           - List active input devices',
-          '  session           - Show active sessions',
-          '  env               - Show environment variables',
-          '  export KEY=VALUE  - Set environment variable',
-        ].join('\n');
+type FsNode = { type: 'dir' } | { type: 'file'; content: string };
+type Fs = Record<string, FsNode>;
 
-      case 'clear':
-        setHistory([]);
-        return '';
+function initialFs(): Fs {
+  return {
+    '/': { type: 'dir' },
+    '/home': { type: 'dir' },
+    [HOME]: { type: 'dir' },
+    [`${HOME}/readme.txt`]: { type: 'file', content: 'Welcome to FreeCompute WebOS.\nType "help" to list commands.' },
+    [`${HOME}/projects`]: { type: 'dir' },
+  };
+}
 
-      case 'date':
-        return new Date().toString();
+function resolvePath(cwd: string, arg: string): string {
+  if (!arg || arg === '.') return cwd;
+  if (arg === '~') return HOME;
+  if (arg.startsWith('~/')) arg = HOME + arg.slice(1);
+  const start = arg.startsWith('/') ? arg : `${cwd}/${arg}`;
+  const stack: string[] = [];
+  for (const p of start.split('/')) {
+    if (!p || p === '.') continue;
+    if (p === '..') stack.pop();
+    else stack.push(p);
+  }
+  return '/' + stack.join('/');
+}
 
-      case 'whoami':
-        if (tokens) return `Authenticated user`;
-        return 'Not logged in. Use WebOS login screen.';
+function displayPath(p: string): string {
+  if (p === HOME) return '~';
+  if (p.startsWith(HOME + '/')) return '~' + p.slice(HOME.length);
+  return p;
+}
 
-      case 'echo':
-        return args.join(' ');
-
-      case 'gateway':
-        try {
-          const health = await fetch(`${getGatewayUrl()}/healthz`).then(r => r.json());
-          const caps = await fetch(`${getGatewayUrl()}/capabilities`).then(r => r.json());
-          return `Gateway: ${getGatewayUrl()}\nStatus: ${JSON.stringify(health)}\nProtocols: ${caps.protocols?.join(', ') || 'N/A'}\nModes: ${caps.routeModes?.join(', ') || 'N/A'}`;
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-
-      case 'webrtc':
-        return 'WebRTC: Use POST /webrtc/ with {"clientId":"...","preset":"fast"}';
-
-      case 'tailscale':
-        try {
-          const hosts = await fetch(`${getGatewayUrl()}/tailscale/hosts`).then(r => r.json());
-          return `Tailscale Hosts:\n${(hosts.hosts || []).map((h: any) => `  ${h.tailscaleIp} ${h.hostName} (${h.vms?.length || 0} VMs)`).join('\n') || '  None registered'}`;
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-
-      case 'proxy':
-        if (args.length === 0) return 'Usage: proxy <target-url>';
-        try {
-          const testRes = await fetch(`${getGatewayUrl()}/proxy/web/${args[0]}`, {
-            headers: tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : {},
-          });
-          return `Proxy test: ${testRes.status} ${testRes.statusText}`;
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-
-      case 'ssh':
-        if (args.length === 0) return 'Usage: ssh <host:port>\nConnect via WebSocket tunnel: ws://gateway/ws/{routeID}';
-        return `SSH tunnel to ${args[0]}: Use WebSocket at /ws/{routeID} or CONNECT at /connect/{routeID}`;
-
-      case 'ls':
-        try {
-          if (!tokens) return 'Not authenticated';
-          const params = new URLSearchParams({ userId: tokens.accessToken, path: '' });
-          const res = await fetch(`${getGatewayUrl()}/storage/list?${params}`);
-          const data = await res.json();
-          const files = data.files || [];
-          if (files.length === 0) return 'No files';
-          return files.map((f: any) => `${f.isDir ? 'd' : '-'} ${f.name} (${formatSize(f.size)})`).join('\n');
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-
-      case 'cat':
-        if (args.length === 0) return 'Usage: cat <path>';
-        try {
-          if (!tokens) return 'Not authenticated';
-          const params = new URLSearchParams({ userId: tokens.accessToken, path: args[0] });
-          const res = await fetch(`${getGatewayUrl()}/storage/download?${params}`);
-          if (!res.ok) return 'File not found';
-          return await res.text();
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-
-      case 'storage':
-        try {
-          if (!tokens) return 'Not authenticated';
-          const profile = await apiFetch('/auth/profile');
-          const used = profile.storageUsed || 0;
-          const quota = profile.storageQuota || 107374182400;
-          return `Storage: ${formatSize(used)} / ${formatSize(quota)} (${Math.round((used/quota)*100)}%)`;
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-
-      case 'devices':
-        return 'Input devices: keyboard, mouse, touch, gamepad';
-
-      case 'session':
-        return 'Active sessions: Check GET /sessions/';
-
-      case 'env':
-        return Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n') || '(empty)';
-
-      case 'export':
-        if (args.length === 0) return 'Usage: export KEY=VALUE';
-        const eq = args[0].indexOf('=');
-        if (eq === -1) return 'Format: KEY=VALUE';
-        const key = args[0].slice(0, eq);
-        const val = args[0].slice(eq + 1);
-        setEnv(prev => ({ ...prev, [key]: val }));
-        return '';
-
-      default:
-        return `Unknown command: ${command}. Type "help" for commands.`;
-    }
-  }, [env]);
-
-  const handleSubmit = useCallback(async (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = input.trim();
-    if (!trimmed) return;
-    setHistory(prev => [...prev, `$ ${trimmed}`]);
-    try {
-      const output = await executeCommand(trimmed);
-      if (output) {
-        setHistory(prev => [...prev, output]);
-      }
-    } catch (err: any) {
-      setHistory(prev => [...prev, `Error: ${err.message}`]);
-    }
-    setHistory(prev => [...prev, '']);
-    setInput('');
-  }, [input, executeCommand]);
-
-  return (
-    <div
-      style={{ background: '#0a0e14', color: '#b3b1ad', height: '100%', display: 'flex', flexDirection: 'column', fontFamily: 'monospace', fontSize: 13, cursor: 'text' }}
-      onClick={() => inputRef.current?.focus()}
-    >
-      <div style={{ flex: 1, overflow: 'auto', padding: '8px 12px' }}>
-        {history.map((line, i) => (
-          <div key={i} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.5 }}>
-            {line.startsWith('$ ') ? <span><span style={{ color: '#b8cc52' }}>$</span> {line.slice(2)}</span> : line}
-          </div>
-        ))}
-      </div>
-      <form onSubmit={handleSubmit} style={{ display: 'flex', padding: '4px 12px', borderTop: '1px solid #1a1e24' }}>
-        <span style={{ color: '#b8cc52', marginRight: 8 }}>$</span>
-        <input
-          ref={inputRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          style={{ background: 'none', border: 'none', color: '#b3b1ad', flex: 1, outline: 'none', fontFamily: 'monospace', fontSize: 13 }}
-          autoFocus
-        />
-      </form>
-    </div>
-  );
+function childrenOf(fs: Fs, dir: string): string[] {
+  const prefix = dir === '/' ? '/' : dir + '/';
+  return Object.keys(fs)
+    .filter((k) => k.startsWith(prefix) && k.slice(prefix.length).indexOf('/') === -1)
+    .map((k) => k.slice(prefix.length));
 }
 
 function formatSize(bytes: number): string {
@@ -207,4 +61,262 @@ function formatSize(bytes: number): string {
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+export default function TerminalApp() {
+  const [input, setInput] = useState('');
+  const [lines, setLines] = useState<{ kind: 'in' | 'out' | 'err'; text: string }[]>([
+    { kind: 'out', text: 'FreeCompute WebOS Terminal v0.1.0' },
+    { kind: 'out', text: 'Type "help" for available commands.' },
+  ]);
+  const [cwd, setCwd] = useState<string>(HOME);
+  const [fs, setFs] = useState<Fs>(initialFs);
+  const [cmdHistory, setCmdHistory] = useState<string[]>([]);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    const focus = () => inputRef.current?.focus();
+    window.addEventListener('click', focus);
+    return () => window.removeEventListener('click', focus);
+  }, []);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+  }, [lines]);
+
+  const username = () => getUser()?.displayName || getTokens()?.accessToken || 'guest';
+  const prompt = () => `${username()}@webos:${displayPath(cwd)}$`;
+
+  const gateway = useCallback(
+    async (fn: () => Promise<string>) => {
+      try {
+        return await fn();
+      } catch {
+        return 'unreachable (demo)';
+      }
+    },
+    []
+  );
+
+  const execute = useCallback(
+    async (cmd: string): Promise<string> => {
+      const tokens = getTokens();
+      const parts = cmd.trim().split(/\s+/);
+      const command = parts[0].toLowerCase();
+      const args = parts.slice(1);
+
+      switch (command) {
+        case 'help':
+          return [
+            'Available commands:',
+            '  help              - Show this help',
+            '  clear             - Clear the screen',
+            '  ls [dir]          - List directory contents',
+            '  cd <dir>          - Change directory',
+            '  pwd               - Print working directory',
+            '  mkdir <name>      - Create a directory',
+            '  touch <name>      - Create an empty file',
+            '  rm <name>         - Remove a file or directory',
+            '  cat <file>        - Print file contents',
+            '  echo <text>       - Print text',
+            '  whoami            - Show current user',
+            '  date              - Show current date/time',
+            '  history           - Show command history',
+            '  gateway           - Show gateway status',
+            '  proxy <url>       - Test proxy connection',
+            '  tailscale         - Show Tailscale status',
+            '  storage           - Show storage quota',
+          ].join('\n');
+
+        case 'clear':
+          setLines([]);
+          return '';
+
+        case 'echo':
+          return args.join(' ');
+
+        case 'date':
+          return new Date().toString();
+
+        case 'whoami':
+          if (tokens) return `Authenticated as ${username()}`;
+          return 'Not logged in. Use the WebOS login screen.';
+
+        case 'pwd':
+          return displayPath(cwd);
+
+        case 'ls': {
+          const target = args[0] ? resolvePath(cwd, args[0]) : cwd;
+          if (!fs[target] || fs[target].type !== 'dir') {
+            return `ls: ${args[0] || displayPath(cwd)}: No such directory`;
+          }
+          const kids = childrenOf(fs, target);
+          if (kids.length === 0) return '(empty)';
+          return kids
+            .map((name) => {
+              const node = fs[target === '/' ? `/${name}` : `${target}/${name}`];
+              return node.type === 'dir' ? `${name}/` : name;
+            })
+            .join('\n');
+        }
+
+        case 'cd': {
+          if (args.length === 0 || args[0] === '~' || args[0] === 'home') {
+            setCwd(HOME);
+            return '';
+          }
+          const target = resolvePath(cwd, args[0]);
+          if (!fs[target]) return `cd: ${args[0]}: No such file or directory`;
+          if (fs[target].type !== 'dir') return `cd: ${args[0]}: Not a directory`;
+          setCwd(target);
+          return '';
+        }
+
+        case 'mkdir': {
+          if (args.length === 0) return 'Usage: mkdir <name>';
+          const target = resolvePath(cwd, args[0]);
+          if (fs[target]) return `mkdir: ${args[0]}: File exists`;
+          const parent = target.includes('/') ? target.slice(0, target.lastIndexOf('/')) || '/' : '/';
+          if (!fs[parent] || fs[parent].type !== 'dir') return `mkdir: ${args[0]}: No such directory`;
+          setFs((prev) => ({ ...prev, [target]: { type: 'dir' } }));
+          return '';
+        }
+
+        case 'touch': {
+          if (args.length === 0) return 'Usage: touch <name>';
+          const target = resolvePath(cwd, args[0]);
+          if (fs[target] && fs[target].type === 'dir') return `touch: ${args[0]}: Is a directory`;
+          if (!fs[target]) {
+            const parent = target.includes('/') ? target.slice(0, target.lastIndexOf('/')) || '/' : '/';
+            if (!fs[parent] || fs[parent].type !== 'dir') return `touch: ${args[0]}: No such directory`;
+            setFs((prev) => ({ ...prev, [target]: { type: 'file', content: '' } }));
+          }
+          return '';
+        }
+
+        case 'rm': {
+          if (args.length === 0) return 'Usage: rm <name>';
+          const target = resolvePath(cwd, args[0]);
+          if (!fs[target]) return `rm: ${args[0]}: No such file or directory`;
+          setFs((prev) => {
+            const next = { ...prev };
+            const prefix = target === '/' ? '/' : target + '/';
+            for (const k of Object.keys(next)) {
+              if (k === target || k.startsWith(prefix)) delete next[k];
+            }
+            return next;
+          });
+          return '';
+        }
+
+        case 'cat': {
+          if (args.length === 0) return 'Usage: cat <file>';
+          const target = resolvePath(cwd, args[0]);
+          if (!fs[target]) return `cat: ${args[0]}: No such file or directory`;
+          if (fs[target].type === 'dir') return `cat: ${args[0]}: Is a directory`;
+          return (fs[target] as { content: string }).content || '';
+        }
+
+        case 'history':
+          return cmdHistory.map((c, i) => `  ${i + 1}  ${c}`).join('\n') || '(no history)';
+
+        case 'gateway':
+          return gateway(async () => {
+            const base = getGatewayUrl();
+            const health = await fetch(`${base}/healthz`).then((r) => r.json());
+            const caps = await fetch(`${base}/capabilities`).then((r) => r.json());
+            return `Gateway: ${base}\nStatus: ${JSON.stringify(health)}\nProtocols: ${(caps.protocols || []).join(', ') || 'N/A'}\nModes: ${(caps.routeModes || []).join(', ') || 'N/A'}`;
+          });
+
+        case 'proxy':
+          if (args.length === 0) return 'Usage: proxy <target-url>';
+          return gateway(async () => {
+            const base = getGatewayUrl();
+            const res = await fetch(`${base}/proxy/web/${args[0]}`, {
+              headers: tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : {},
+            });
+            return `Proxy test: ${res.status} ${res.statusText}`;
+          });
+
+        case 'tailscale':
+          return gateway(async () => {
+            const hosts = await fetch(`${getGatewayUrl()}/tailscale/hosts`).then((r) => r.json());
+            const list = (hosts.hosts || []).map(
+              (h: any) => `  ${h.tailscaleIp} ${h.hostName} (${(h.vms || []).length} VMs)`
+            );
+            return `Tailscale Hosts:\n${list.join('\n') || '  None registered'}`;
+          });
+
+        case 'storage':
+          return gateway(async () => {
+            const profile = await apiFetch('/auth/profile');
+            const used = profile.storageUsed || 0;
+            const quota = profile.storageQuota || 10737418240;
+            return `Storage: ${formatSize(used)} / ${formatSize(quota)} (${Math.round((used / quota) * 100)}%)`;
+          });
+
+        default:
+          return `Unknown command: ${command}. Type "help" for commands.`;
+      }
+    },
+    [cwd, fs, cmdHistory, gateway]
+  );
+
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      const trimmed = input.trim();
+      if (!trimmed) return;
+      const p = prompt();
+      setLines((prev) => [...prev, { kind: 'in', text: `${p} ${trimmed}` }]);
+      setCmdHistory((prev) => [...prev, trimmed]);
+      try {
+        const output = await execute(trimmed);
+        if (output) setLines((prev) => [...prev, { kind: 'out', text: output }]);
+      } catch (err: any) {
+        setLines((prev) => [...prev, { kind: 'err', text: `Error: ${err.message}` }]);
+      }
+      setInput('');
+    },
+    [input, execute]
+  );
+
+  const colorFor = (kind: 'in' | 'out' | 'err') =>
+    kind === 'err' ? C.error : kind === 'in' ? C.text : C.text;
+
+  return (
+    <div
+      style={{ background: C.bg, color: C.text, height: '100%', display: 'flex', flexDirection: 'column', fontFamily: FONT, fontSize: 13, cursor: 'text' }}
+      onClick={() => inputRef.current?.focus()}
+    >
+      <div ref={scrollRef} style={{ flex: 1, overflow: 'auto', padding: '8px 12px' }}>
+        {lines.map((line, i) => (
+          <div key={i} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.5, color: colorFor(line.kind) }}>
+            {line.kind === 'in' ? (
+              <span>
+                <span style={{ color: C.prompt }}>{prompt()}</span> {line.text.replace(prompt(), '').trim()}
+              </span>
+            ) : (
+              line.text
+            )}
+          </div>
+        ))}
+      </div>
+      <form
+        onSubmit={handleSubmit}
+        style={{ display: 'flex', padding: '4px 12px', borderTop: '1px solid #1a1e24' }}
+      >
+        <span style={{ color: C.prompt, marginRight: 8 }}>{prompt()}</span>
+        <input
+          ref={inputRef}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          style={{ background: 'none', border: 'none', color: C.text, flex: 1, outline: 'none', fontFamily: FONT, fontSize: 13 }}
+          autoFocus
+        />
+      </form>
+    </div>
+  );
 }

@@ -1,5 +1,7 @@
 import type { NextConfig } from 'next'
 
+const isDev = process.env.NODE_ENV === 'development'
+
 const csp = [
   "default-src 'self'",
   "connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* https://*.stun.l.google.com",
@@ -9,6 +11,10 @@ const csp = [
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self' data:",
   "frame-ancestors 'none'",
+  // React hydration in development requires inline scripts and eval.
+  isDev
+    ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+    : "script-src 'self'",
 ].join('; ')
 
 const nextConfig: NextConfig = {
@@ -41,17 +47,27 @@ const nextConfig: NextConfig = {
   },
 
   async headers() {
-    return [
-      {
-        source: '/:path*',
-        headers: [
+    const baseHeaders: { key: string; value: string }[] = [
+      { key: 'Content-Security-Policy', value: csp },
+    ]
+
+    // Harden headers are applied only in production. In development the CSP is
+    // intentionally relaxed (unsafe-inline + unsafe-eval) so React hydration and
+    // HMR work without triggering CSP violations.
+    const hardenHeaders: { key: string; value: string }[] = isDev
+      ? []
+      : [
           { key: 'X-Content-Type-Options', value: 'nosniff' },
           { key: 'X-Frame-Options', value: 'DENY' },
           { key: 'X-XSS-Protection', value: '1; mode=block' },
           { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
-          { key: 'Content-Security-Policy', value: csp },
           { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()' },
-        ],
+        ]
+
+    return [
+      {
+        source: '/:path*',
+        headers: [...baseHeaders, ...hardenHeaders],
       },
       {
         source: '/proxy/:path*',

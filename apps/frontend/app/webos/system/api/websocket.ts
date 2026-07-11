@@ -33,7 +33,6 @@ async function gatewayFetch<T>(url: string, opts: RequestInit = {}): Promise<T> 
     const resp = await fetch(url, {
       ...opts,
       signal,
-      keepalive: true,
       headers: {
         'Accept': 'application/json',
         ...(opts.headers as Record<string, string>),

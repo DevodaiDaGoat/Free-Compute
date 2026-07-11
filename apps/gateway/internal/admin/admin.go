@@ -133,7 +133,7 @@ func (m *AdminManager) GetSettings() *SystemSettings {
 	return &SystemSettings{
 		AutoDetectDomain:      m.autoDetectDomain,
 		MaxUsers:              1000,
-		DefaultStorageQuota:   100 * 1024 * 1024 * 1024,
+		DefaultStorageQuota:   10 * 1024 * 1024 * 1024,
 		ThreatDetection:       true,
 		AutoPauseOnThreat:     true,
 		RequireAIReview:       true,

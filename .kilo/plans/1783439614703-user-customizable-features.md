@@ -9,7 +9,7 @@
 
 ## Foundations (verified)
 - DB: `apps/gateway/internal/database/database.go` (`Open` L138, `migrate` L160; tables L162–292;
-  queries parameterized with `?`). `users.storage_quota` default = 100 GB (`107374182400`).
+  queries parameterized with `?`). `users.storage_quota` default = 10 GB (`10737418240`).
 - Route mounts (server.go): `/auth/*` at L267–270 use `auth.RequireAuth(authMgr, h)`;
   `/admin/*` at L256–264 use `adminWrap` = `auth.RequireAuth(authMgr, server.adminHandler.RequireAdmin(h))`.
   `RequireAdmin` (admin.go:129) hardcodes `user.Email=="admin"`. No `/auth/preferences`,
@@ -50,7 +50,7 @@
   and exits 0 with no KVM; `docker compose up vm-agent` registers a VM visible in `/hosts/metrics`.
 
 ## Phase 2 — Pillar A: Personalization (FIRST FEATURE PILLAR)
-> Storage shared per-user (100 GB); personalization per-user, NOT shared by default; cross-device
+> Storage shared per-user (10 GB); personalization per-user, NOT shared by default; cross-device
 > sync is OPT-IN (user requests, moderator accepts).
 1. **K1** (column added Phase 0): `GET/PUT /auth/preferences` → `AuthManager.Get/SavePreferences`
    → `DB.Get/SetUserPreferences`. Blob JSON-validated, capped 64 KB. Frontend

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -171,8 +172,8 @@ func LoadConfigFromEnv() (Config, error) {
 		MaxProxyCacheMB:       intFromEnv("FREECOMPUTE_PROXY_CACHE_MAX_SIZE_MB", 256),
 		EnableSessionReplay:   strings.TrimSpace(os.Getenv("FREECOMPUTE_ENABLE_SESSION_REPLAY")) != "false",
 		EnableSpeedTest:       strings.TrimSpace(os.Getenv("FREECOMPUTE_ENABLE_SPEED_TEST")) != "false",
-		RecordingDir:          valueOrDefault(os.Getenv("FREECOMPUTE_RECORDING_DIR"), "/tmp/freecompute-recordings"),
-		DBPath:                valueOrDefault(os.Getenv("FREECOMPUTE_DB_PATH"), "/tmp/freecompute.db"),
+		RecordingDir:          valueOrDefault(os.Getenv("FREECOMPUTE_RECORDING_DIR"), filepath.Join(os.TempDir(), "freecompute-recordings")),
+		DBPath:                valueOrDefault(os.Getenv("FREECOMPUTE_DB_PATH"), filepath.Join(os.TempDir(), "freecompute.db")),
 		ModerationLLMURL:       valueOrDefault(os.Getenv("FREECOMPUTE_MODERATION_LLM_URL"), ""),
 		ModerationLLMKey:       valueOrDefault(os.Getenv("FREECOMPUTE_MODERATION_LLM_KEY"), ""),
 		DefaultBrowsingMode:    valueOrDefault(strings.ToLower(os.Getenv("FREECOMPUTE_DEFAULT_BROWSING_MODE")), "casual"),
@@ -186,7 +187,15 @@ func LoadConfigFromEnv() (Config, error) {
 		MaxConnsPerUser:        intFromEnv("FREECOMPUTE_MAX_CONNS_PER_USER", 200),
 	}
 
+	// Prefer routes file over env var
 	rawRoutes := strings.TrimSpace(os.Getenv("FREECOMPUTE_TUNNEL_ROUTES"))
+	rawRoutesFile := strings.TrimSpace(os.Getenv("FREECOMPUTE_TUNNEL_ROUTES_FILE"))
+	if rawRoutesFile != "" {
+		data, err := os.ReadFile(rawRoutesFile)
+		if err == nil {
+			rawRoutes = string(data)
+		}
+	}
 	if rawRoutes == "" {
 		return cfg, nil
 	}

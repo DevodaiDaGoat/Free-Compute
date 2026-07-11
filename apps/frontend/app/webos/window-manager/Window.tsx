@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Minimize2, Maximize2, X } from 'lucide-react';
 import type { AppWindow } from '../system/types';
 import type { ReactNode } from 'react';
 
@@ -112,9 +113,9 @@ export default function Window({ window: win, appComponents, onFocus, onClose, o
         }}
       >
         <span style={{ flex: 1, fontSize: 12, color: '#aaa', marginLeft: 8 }}>{win.title}</span>
-        <button onClick={onMinimize} style={btnStyle}>─</button>
-        <button onClick={onMaximize} style={btnStyle}>{win.maximized ? '❐' : '□'}</button>
-        <button onClick={onClose} style={{ ...btnStyle, color: '#f44' }}>✕</button>
+        <button onClick={onMinimize} style={btnStyle} title="Minimize"><Minimize2 size={12} /></button>
+        <button onClick={onMaximize} style={btnStyle} title={win.maximized ? 'Restore' : 'Maximize'}>{win.maximized ? <Maximize2 size={12} style={{ transform: 'rotate(180deg)' }} /> : <Maximize2 size={12} />}</button>
+        <button onClick={onClose} style={{ ...btnStyle, color: '#f44' }}><X size={12} /></button>
       </div>
       <div style={{ flex: 1, overflow: 'auto', background: '#0d0d1a', color: '#ccc', fontSize: 13 }}>
         {AppComponent ? <AppComponent /> : <div style={{ padding: 24, color: '#666' }}>App content</div>}

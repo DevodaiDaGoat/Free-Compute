@@ -875,7 +875,7 @@ Bob redeems credits for:
 |------------|---------|-------------|
 | CPU | 4 cores | 8+ cores |
 | RAM | 16 GB | 32+ GB |
-| Storage | 100 GB free | 500 GB+ SSD |
+| Storage | 10 GB free | 500 GB+ SSD |
 | GPU | None (optional) | NVIDIA GTX 1060+ / AMD equivalent |
 | Network | 50 Mbps | 500 Mbps+ |
 | Uptime | 50%+ | 90%+ |

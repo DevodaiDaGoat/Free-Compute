@@ -10,6 +10,8 @@ import (
 	"golang.org/x/net/http2"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -158,7 +160,7 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	} else {
 		authMgr = auth.NewAuthManager(logger)
 	}
-	storeMgr := storage.NewStorageManager(logger, "/tmp/freecompute-storage")
+	storeMgr := storage.NewStorageManager(logger, filepath.Join(os.TempDir(), "freecompute-storage"))
 	secDetector := security.NewSecurityDetector(logger)
 
 	if db != nil {
@@ -262,6 +264,9 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	server.rateLimiter = ratelimit.NewLimiter(cfg.RateLimitRPM/60, cfg.RateLimitRPM/4)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/capabilities", http.StatusFound)
+	})
 	mux.HandleFunc("/healthz", server.handleHealth)
 	mux.HandleFunc("/capabilities", server.handleCapabilities)
 	mux.HandleFunc("/routes", auth.RequireAuth(authMgr, server.handleRoutes))
@@ -271,8 +276,9 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	mux.HandleFunc("/ssh/", server.handleSSHTunnel)
 	mux.Handle("/ws/", server.rateLimitByIPAndUser(http.HandlerFunc(server.handleWebSocketTunnel)))
 	mux.HandleFunc("/agent/", server.handleAgentTunnel)
-	mux.HandleFunc("/signal/", server.handleSignal)
+	mux.HandleFunc("/signal/", server.webrtcServer.HandleSignal)
 	mux.HandleFunc("/webrtc/", server.handleWebRTC)
+	mux.HandleFunc("/sessions", server.handleListSessions)
 	mux.HandleFunc("/sessions/", server.handleSessions)
 	mux.HandleFunc("/input/", server.handleInput)
 	mux.HandleFunc("/audio/", server.handleAudio)
@@ -287,8 +293,8 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	mux.HandleFunc("/tailscale/user", server.handleUserTailscale)
 	mux.HandleFunc("/tailscale/proxy", server.handleTailscaleProxy)
 	mux.HandleFunc("/hosts/", server.handleHosts)
-	mux.HandleFunc("/hosts/register", auth.RequireAuth(authMgr, server.handleHostRegister))
-	mux.HandleFunc("/hosts/metrics", auth.RequireAuth(authMgr, server.handleHostMetrics))
+	mux.HandleFunc("/hosts/register", server.handleHostRegister)
+	mux.HandleFunc("/hosts/metrics", server.handleHostMetrics)
 
 	// Admin routes
 	adminWrap := func(h http.HandlerFunc) http.HandlerFunc {
@@ -298,6 +304,7 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 		return auth.RequireAuth(authMgr, auth.RequireRole(1, authMgr, h))
 	}
 	mux.HandleFunc("/admin/dashboard", modWrap(server.adminHandler.Dashboard))
+	mux.HandleFunc("/admin/health", modWrap(server.handleAdminHealth))
 	mux.HandleFunc("/admin/users", modWrap(server.adminHandler.ListUsers))
 	mux.HandleFunc("/admin/users/delete", adminWrap(server.adminHandler.DeleteUser))
 	mux.HandleFunc("/admin/threats", modWrap(server.adminHandler.ListThreats))
@@ -393,6 +400,8 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	server.healthChecker.ReportHealth("http", monitoring.HealthOK, fmt.Sprintf("listening on %s", cfg.Addr), 0)
 	server.healthChecker.ReportHealth("tunnel", monitoring.HealthOK, fmt.Sprintf("%d routes loaded", len(cfg.Routes)), 0)
 
+	server.compressMiddleware.SkipPath("/capabilities")
+	server.compressMiddleware.SkipPath("/healthz")
 	handler := withCommonHeaders(server.compressMiddleware.Handler(mux), cfg)
 	server.httpServer = &http.Server{
 		Addr:              cfg.Addr,
@@ -633,6 +642,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte(`{"status":"ok"}`))
 }
 
+func (s *Server) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":    "ok",
+		"timestamp": time.Now(),
+	})
+}
+
 func (s *Server) handleBrowsingModes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -805,6 +825,30 @@ func (s *Server) handleCreateWebRTCSession(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var sessionList []map[string]interface{}
+
+	for _, sess := range s.sessionManager.ListSessions() {
+		sessionList = append(sessionList, map[string]interface{}{
+			"id":             sess.ID,
+			"state":          sess.State,
+			"mode":           sess.Mode,
+			"type":           sess.Type,
+			"resourceClass":  sess.ResourceClass,
+			"streamPreset":   sess.StreamProfile.Preset,
+			"connectionToken": sess.ConnectionToken,
+		})
+	}
+
+	sessionList = append(sessionList, s.webrtcServer.ListSessions()...)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"sessions": sessionList})
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -1435,22 +1479,21 @@ func (s *Server) handleHostMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	vmID, _ := metrics["vmId"].(string)
-	cpuUsage, _ := metrics["cpuUsage"].(float64)
-	gpuUsage, _ := metrics["gpuUsage"].(float64)
-	networkTx, _ := metrics["networkTx"].(float64)
-	networkRx, _ := metrics["networkRx"].(float64)
-	processes := 0
-	if p, ok := metrics["processes"].(float64); ok {
-		processes = int(p)
-	} else if p, ok := metrics["processes"].(int); ok {
-		processes = p
+	vmID, _ := metrics["hostId"].(string)
+	cpuUsage, _ := metrics["cpuUsagePercent"].(float64)
+	ramUsage, _ := metrics["ramUsagePercent"].(float64)
+	gpuUsage, _ := metrics["gpuUsagePercent"].(float64)
+	networkTx, _ := metrics["networkTxMbps"].(float64)
+	networkRx, _ := metrics["networkRxMbps"].(float64)
+	activeStreams := 0
+	if p, ok := metrics["activeStreams"].(float64); ok {
+		activeStreams = int(p)
 	}
 
 	network := networkTx + networkRx
 
 	if s.securityDetector != nil {
-		s.securityDetector.AnalyzeMetrics(vmID, cpuUsage, gpuUsage, network, processes)
+		s.securityDetector.AnalyzeMetrics(vmID, cpuUsage, gpuUsage, network, 0)
 	}
 
 	if s.db != nil && vmID != "" {
@@ -1466,7 +1509,7 @@ func (s *Server) handleHostMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.logger.Printf("host metrics: vmid=%v cpu=%v ram=%v", metrics["vmId"], metrics["cpuUsage"], metrics["ramUsage"])
+	s.logger.Printf("host metrics: vmid=%s cpu=%g ram=%g gpu=%g tx=%g rx=%g streams=%d", vmID, cpuUsage, ramUsage, gpuUsage, networkTx, networkRx, activeStreams)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "received"})
 }
 

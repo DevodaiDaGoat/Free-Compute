@@ -11,18 +11,7 @@ echo "Root: $ROOT"
 export FREECOMPUTE_GATEWAY_ADDR="${FREECOMPUTE_GATEWAY_ADDR:-:8080}"
 export FREECOMPUTE_TUNNEL_TOKEN="${FREECOMPUTE_TUNNEL_TOKEN:-dev-token}"
 
-export FREECOMPUTE_TUNNEL_ROUTES="${FREECOMPUTE_TUNNEL_ROUTES:-[
-  {\"id\":\"web\",\"protocol\":\"http\",\"target\":\"http://localhost:3000\"},
-  {\"id\":\"api\",\"protocol\":\"http\",\"target\":\"http://localhost:8081\"},
-  {\"id\":\"vm-http\",\"protocol\":\"http\",\"target\":\"http://localhost:8082\"},
-  {\"id\":\"vm-ws\",\"protocol\":\"websocket\",\"target\":\"http://localhost:8082\"},
-  {"id":"vm-ssh","protocol":"ssh","target":"agent"},
-  {\"id\":\"vm-tcp\",\"protocol\":\"tcp\",\"target\":\"agent\"},
-  {\"id\":\"vm-udp\",\"protocol\":\"udp\",\"target\":\"localhost:30000\"},
-  {\"id\":\"rtc\",\"protocol\":\"webrtc\",\"listen\":\"0.0.0.0:8443\"},
-  {\"id\":\"p2p-signal\",\"protocol\":\"p2p\",\"target\":\"\"},
-  {\"id\":\"game-udp\",\"protocol\":\"udp\",\"listen\":\"0.0.0.0:30001\",\"target\":\"localhost:30001\"}
-]}"
+export FREECOMPUTE_TUNNEL_ROUTES="${FREECOMPUTE_TUNNEL_ROUTES:-[{\"id\":\"web\",\"protocol\":\"http\",\"target\":\"http://localhost:3000\"},{\"id\":\"api\",\"protocol\":\"http\",\"target\":\"http://localhost:8081\"},{\"id\":\"vm-http\",\"protocol\":\"http\",\"target\":\"http://localhost:8082\"},{\"id\":\"vm-ws\",\"protocol\":\"websocket\",\"target\":\"http://localhost:8082\"},{\"id\":\"vm-ssh\",\"protocol\":\"ssh\",\"target\":\"agent\"},{\"id\":\"vm-tcp\",\"protocol\":\"tcp\",\"target\":\"agent\"},{\"id\":\"vm-udp\",\"protocol\":\"udp\",\"target\":\"localhost:30000\"},{\"id\":\"rtc\",\"protocol\":\"webrtc\",\"listen\":\"0.0.0.0:8443\"},{\"id\":\"p2p-signal\",\"protocol\":\"p2p\",\"target\":\"\"},{\"id\":\"game-udp\",\"protocol\":\"udp\",\"listen\":\"0.0.0.0:30001\",\"target\":\"localhost:30001\"}]}"
 
 export FREECOMPUTE_GATEWAY_SHUTDOWN_SECONDS="${FREECOMPUTE_GATEWAY_SHUTDOWN_SECONDS:-5}"
 export FREECOMPUTE_TUNNEL_DIAL_SECONDS="${FREECOMPUTE_TUNNEL_DIAL_SECONDS:-3}"
@@ -54,6 +43,7 @@ cleanup() {
     echo ""
     echo "Stopping services..."
     pkill -f "freecompute-gateway" 2>/dev/null || true
+    pkill -f "freecompute-vm-setup" 2>/dev/null || true
     pkill -f "next dev" 2>/dev/null || true
     pkill -f "next start" 2>/dev/null || true
     sleep 1
@@ -66,7 +56,7 @@ trap cleanup EXIT INT TERM
 # ------------------------------------------------------------------
 echo ""
 echo "[1] Building gateway (includes tunnels) in background..."
-(cd "$ROOT/apps/gateway" && go build -buildvcs=false -o /tmp/freecompute-gateway ./cmd/gateway) &
+(cd "$ROOT/apps/gateway" && go build -buildvcs=false -o ${TMPDIR:-/tmp}/freecompute-gateway ./cmd/gateway) &
 BUILD_PID=$!
 
 # ------------------------------------------------------------------
@@ -74,7 +64,7 @@ BUILD_PID=$!
 # ------------------------------------------------------------------
 wait $BUILD_PID
 echo "[2] Starting gateway on $FREECOMPUTE_GATEWAY_ADDR..."
-/tmp/freecompute-gateway &
+${TMPDIR:-/tmp}/freecompute-gateway &
 GATEWAY_PID=$!
 sleep 0.5
 
@@ -92,12 +82,41 @@ else
 fi
 
 # ------------------------------------------------------------------
+# Storage directory
+# ------------------------------------------------------------------
+mkdir -p ${TMPDIR:-/tmp}/freecompute-storage
+echo "  Storage: ${TMPDIR:-/tmp}/freecompute-storage (10GB per user)"
+
+# ------------------------------------------------------------------
+# Build vm-setup in background
+# ------------------------------------------------------------------
+echo ""
+echo "[3a] Building vm-setup in background..."
+(cd "$ROOT/host-agent" && go build -buildvcs=false -o ${TMPDIR:-/tmp}/freecompute-vm-setup ./cmd/vm-setup) &
+VM_SETUP_BUILD_PID=$!
+
+# ------------------------------------------------------------------
 # Start frontend
 # ------------------------------------------------------------------
 echo "[3] Starting frontend dev server..."
 (cd "$ROOT/apps/frontend" && npm run dev) &
 FRONTEND_PID=$!
 echo "  Frontend starting (PID $FRONTEND_PID)"
+
+wait $VM_SETUP_BUILD_PID
+
+# ------------------------------------------------------------------
+# Start vm-setup
+# ------------------------------------------------------------------
+echo "[4] Starting vm-setup agent..."
+export FREECOMPUTE_GATEWAY_URL="http://localhost${FREECOMPUTE_GATEWAY_ADDR}"
+export FREECOMPUTE_AGENT_TOKEN="${FREECOMPUTE_TUNNEL_TOKEN:-dev-token}"
+export FREECOMPUTE_VM_ID="local-vm-1"
+export FREECOMPUTE_VM_REGION="local"
+export FREECOMPUTE_VM_STORAGEGB="10"
+${TMPDIR:-/tmp}/freecompute-vm-setup &
+VM_SETUP_PID=$!
+echo "  vm-setup started (PID $VM_SETUP_PID)"
 
 # ------------------------------------------------------------------
 # Summary
@@ -109,6 +128,8 @@ echo "Gateway (tunnels): http://localhost${FREECOMPUTE_GATEWAY_ADDR}"
 echo "  Health:          http://localhost${FREECOMPUTE_GATEWAY_ADDR}/healthz"
 echo "  Routes:          http://localhost${FREECOMPUTE_GATEWAY_ADDR}/routes"
 echo "Frontend:          http://localhost:3000"
+echo "vm-setup:          PID $VM_SETUP_PID (provisions VMs)"
+echo "Storage:           ${TMPDIR:-/tmp}/freecompute-storage/ (10GB per user)"
 echo ""
 echo "Tunnel routes are managed by the gateway:"
 echo "  HTTP/WS:   /proxy/{routeID}/{path}"

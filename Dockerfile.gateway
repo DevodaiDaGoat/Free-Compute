@@ -6,8 +6,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /freecompute-gateway ./cmd/gateway
 
-FROM scratch
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+FROM alpine:3.19
 COPY --from=builder /freecompute-gateway /freecompute-gateway
 EXPOSE 8080
 ENTRYPOINT ["/freecompute-gateway"]

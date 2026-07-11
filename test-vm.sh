@@ -13,7 +13,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 AGENT_DIR="$ROOT/host-agent"
-BIN="$(mktemp -d)/freecompute-vm-setup"
+BIN="$(mktemp 2>/dev/null || echo ${TMPDIR:-/tmp}/freecompute-vm-setup-XXXXXX)"
 
 GATEWAY_URL="${FREECOMPUTE_GATEWAY_URL:-http://localhost:8080}"
 TOKEN="${FREECOMPUTE_AGENT_TOKEN:-dev-token}"
@@ -36,6 +36,9 @@ echo ""
 echo "=== Live run in background (gateway=$GATEWAY_URL) ==="
 FREECOMPUTE_GATEWAY_URL="$GATEWAY_URL" \
 FREECOMPUTE_AGENT_TOKEN="$TOKEN" \
+FREECOMPUTE_VM_ID="test-vm-1" \
+FREECOMPUTE_VM_REGION="local" \
+FREECOMPUTE_VM_STORAGEGB="10" \
   "$BIN" &
 AGENT_PID=$!
 echo "  vm-agent started (PID $AGENT_PID)"

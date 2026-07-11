@@ -23,25 +23,25 @@ type SessionManager struct {
 }
 
 type Session struct {
-	ID                string
-	UserID            string
-	HostID            string
-	VMID              string
-	Type              SessionType
-	Mode              SessionMode
-	ResourceClass     ResourceClass
-	State             SessionState
-	StreamProfile     StreamProfile
-	Capabilities      SessionCapabilities
-	Permissions       SessionPermissions
-	NetworkQuality    *NetworkQualitySnapshot
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	ExpiresAt         time.Time
-	EndedAt           *time.Time
-	ConnectionToken   string
-	TemporaryLinks    []TemporaryAccessLink
-	Mutex             sync.RWMutex
+	ID                string             `json:"id"`
+	UserID            string             `json:"userId"`
+	HostID            string             `json:"hostId"`
+	VMID              string             `json:"vmId"`
+	Type              SessionType        `json:"type"`
+	Mode              SessionMode        `json:"mode"`
+	ResourceClass     ResourceClass      `json:"resourceClass"`
+	State             SessionState       `json:"state"`
+	StreamProfile     StreamProfile      `json:"streamProfile"`
+	Capabilities      SessionCapabilities `json:"capabilities"`
+	Permissions       SessionPermissions  `json:"permissions"`
+	NetworkQuality    *NetworkQualitySnapshot `json:"networkQuality,omitempty"`
+	CreatedAt         time.Time          `json:"createdAt"`
+	UpdatedAt         time.Time          `json:"updatedAt"`
+	ExpiresAt         time.Time          `json:"expiresAt"`
+	EndedAt           *time.Time         `json:"endedAt,omitempty"`
+	ConnectionToken   string             `json:"connectionToken"`
+	TemporaryLinks    []TemporaryAccessLink `json:"temporaryLinks"`
+	Mutex             sync.RWMutex       `json:"-"`
 }
 
 type SessionType string
@@ -125,38 +125,38 @@ type EncoderConfig struct {
 }
 
 type StreamProfile struct {
-	Preset              string        // 'safe' or 'fast'
-	Transport           string        // 'webrtc' or 'websocket-fallback'
-	VideoCodecs         []string      // ['h263', 'h264', 'h265', 'av1', 'vp8', 'vp9']
-	ActiveVideoCodec    string
-	AudioCodecs         []string      // ['opus', 'aac']
-	ActiveAudioCodec    string
-	EncodingMode        EncodingMode
-	EncoderCfg          EncoderConfig
-	MinBitrateKbps      int
-	StartBitrateKbps    int
-	MaxBitrateKbps      int
-	ResolutionWidth     int
-	ResolutionHeight    int
-	RefreshRateHz       int
-	AdaptiveBitrate     bool
-	AdaptiveResolution  bool
-	PacketLossRecovery  bool
-	AudioEnabled        bool
-	LatencyTargetMs     int
-	KeyframeIntervalMs  int
+	Preset              string        `json:"preset"`
+	Transport           string        `json:"transport"`
+	VideoCodecs         []string      `json:"videoCodecs"`
+	ActiveVideoCodec    string        `json:"activeVideoCodec"`
+	AudioCodecs         []string      `json:"audioCodecs"`
+	ActiveAudioCodec    string        `json:"activeAudioCodec"`
+	EncodingMode        EncodingMode  `json:"encodingMode"`
+	EncoderCfg          EncoderConfig `json:"encoderCfg"`
+	MinBitrateKbps      int           `json:"minBitrateKbps"`
+	StartBitrateKbps    int           `json:"startBitrateKbps"`
+	MaxBitrateKbps      int           `json:"maxBitrateKbps"`
+	ResolutionWidth     int           `json:"resolutionWidth"`
+	ResolutionHeight    int           `json:"resolutionHeight"`
+	RefreshRateHz       int           `json:"refreshRateHz"`
+	AdaptiveBitrate     bool          `json:"adaptiveBitrate"`
+	AdaptiveResolution  bool          `json:"adaptiveResolution"`
+	PacketLossRecovery  bool          `json:"packetLossRecovery"`
+	AudioEnabled        bool          `json:"audioEnabled"`
+	LatencyTargetMs     int           `json:"latencyTargetMs"`
+	KeyframeIntervalMs  int           `json:"keyframeIntervalMs"`
 }
 
 type SessionCapabilities struct {
-	ClipboardSync      bool
-	FileTransfer       bool
-	MultiMonitor       bool
-	AudioForwarding    bool
-	SessionRecording   RecordingMode
-	Fullscreen         bool
-	HighRefreshRate    bool
-	ControllerRumble   bool
-	SupportedInputs    []string
+	ClipboardSync      bool        `json:"clipboardSync"`
+	FileTransfer       bool        `json:"fileTransfer"`
+	MultiMonitor       bool        `json:"multiMonitor"`
+	AudioForwarding    bool        `json:"audioForwarding"`
+	SessionRecording   RecordingMode `json:"sessionRecording"`
+	Fullscreen         bool        `json:"fullscreen"`
+	HighRefreshRate    bool        `json:"highRefreshRate"`
+	ControllerRumble   bool        `json:"controllerRumble"`
+	SupportedInputs    []string    `json:"supportedInputs"`
 }
 
 type RecordingMode string
@@ -168,49 +168,49 @@ const (
 )
 
 type SessionPermissions struct {
-	RequiresUserApproval  bool
-	AllowRemoteControl    bool
-	AllowClipboardRead    bool
-	AllowClipboardWrite   bool
-	AllowFileUpload       bool
-	AllowFileDownload     bool
-	AllowAudioForwarding  bool
-	AllowSessionRecording bool
-	MaxDurationSeconds    int
-	IdleTimeoutSeconds    int
-	ApprovedByUserID      string
-	ApprovedAt            time.Time
+	RequiresUserApproval  bool        `json:"requiresUserApproval"`
+	AllowRemoteControl    bool        `json:"allowRemoteControl"`
+	AllowClipboardRead    bool        `json:"allowClipboardRead"`
+	AllowClipboardWrite   bool        `json:"allowClipboardWrite"`
+	AllowFileUpload       bool        `json:"allowFileUpload"`
+	AllowFileDownload     bool        `json:"allowFileDownload"`
+	AllowAudioForwarding  bool        `json:"allowAudioForwarding"`
+	AllowSessionRecording bool        `json:"allowSessionRecording"`
+	MaxDurationSeconds    int         `json:"maxDurationSeconds"`
+	IdleTimeoutSeconds    int         `json:"idleTimeoutSeconds"`
+	ApprovedByUserID      string      `json:"approvedByUserId"`
+	ApprovedAt            time.Time   `json:"approvedAt"`
 }
 
 type NetworkQualitySnapshot struct {
-	RTTMs               int
-	JitterMs            int
-	PacketLossPercent   float64
-	DownstreamMbps      float64
-	UpstreamMbps        float64
-	Score               float64
-	SampledAt           time.Time
+	RTTMs               int       `json:"rttMs"`
+	JitterMs            int       `json:"jitterMs"`
+	PacketLossPercent   float64   `json:"packetLossPercent"`
+	DownstreamMbps      float64   `json:"downstreamMbps"`
+	UpstreamMbps        float64   `json:"upstreamMbps"`
+	Score               float64   `json:"score"`
+	SampledAt           time.Time `json:"sampledAt"`
 }
 
 type TemporaryAccessLink struct {
-	ID               string
-	SessionID        string
-	CreatedByUserID  string
-	URL              string
-	OneTimeUse       bool
-	Permissions      SessionPermissions
-	CreatedAt        time.Time
-	ExpiresAt        time.Time
-	RevokedAt        *time.Time
-	AccessCount      int
+	ID               string            `json:"id"`
+	SessionID        string            `json:"sessionId"`
+	CreatedByUserID  string            `json:"createdByUserId"`
+	URL              string            `json:"url"`
+	OneTimeUse       bool              `json:"oneTimeUse"`
+	Permissions      SessionPermissions `json:"permissions"`
+	CreatedAt        time.Time         `json:"createdAt"`
+	ExpiresAt        time.Time         `json:"expiresAt"`
+	RevokedAt        *time.Time        `json:"revokedAt,omitempty"`
+	AccessCount      int               `json:"accessCount"`
 }
 
 type PendingApproval struct {
-	SessionID      string
-	RequestedBy    string
-	TargetDeviceID string
-	RequestedAt    time.Time
-	ExpiresAt      time.Time
+	SessionID      string     `json:"sessionId"`
+	RequestedBy    string     `json:"requestedBy"`
+	TargetDeviceID string     `json:"targetDeviceId"`
+	RequestedAt    time.Time  `json:"requestedAt"`
+	ExpiresAt      time.Time  `json:"expiresAt"`
 }
 
 type CreateSessionRequest struct {
@@ -237,10 +237,10 @@ type Resolution struct {
 }
 
 type CreateSessionResponse struct {
-	Session         *Session
-	SignalingURL    string
-	ConnectionToken string
-	EstimatedReady  int
+	Session         *Session `json:"session"`
+	SignalingURL    string   `json:"signalingUrl"`
+	ConnectionToken string   `json:"connectionToken"`
+	EstimatedReady  int      `json:"estimatedReady"`
 }
 
 func NewSessionManager(logger *log.Logger, hostAllocator *HostAllocator) *SessionManager {
@@ -445,6 +445,17 @@ func (m *SessionManager) GetSession(sessionID string) (*Session, error) {
 	}
 
 	return session, nil
+}
+
+func (m *SessionManager) ListSessions() []*Session {
+	m.sessionsMutex.RLock()
+	defer m.sessionsMutex.RUnlock()
+
+	sessions := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		sessions = append(sessions, s)
+	}
+	return sessions
 }
 
 func (m *SessionManager) UpdateSessionState(sessionID string, state SessionState) error {

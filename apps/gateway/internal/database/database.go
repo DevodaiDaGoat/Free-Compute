@@ -209,7 +209,7 @@ func (db *DB) migrate() error {
 			tailscale_cidr TEXT NOT NULL DEFAULT '',
 			tailscale_key TEXT NOT NULL DEFAULT '',
 			storage_used INTEGER NOT NULL DEFAULT 0,
-			storage_quota INTEGER NOT NULL DEFAULT 107374182400,
+			storage_quota INTEGER NOT NULL DEFAULT 10737418240,
 			credits INTEGER NOT NULL DEFAULT 0,
 			role TEXT NOT NULL DEFAULT 'user',
 			verified INTEGER NOT NULL DEFAULT 1,

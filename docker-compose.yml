@@ -9,7 +9,7 @@ services:
     environment:
       FREECOMPUTE_GATEWAY_ADDR: ":8080"
       FREECOMPUTE_TUNNEL_TOKEN: "${FREECOMPUTE_TUNNEL_TOKEN:-dev-token}"
-      FREECOMPUTE_TUNNEL_ROUTES: '${FREECOMPUTE_TUNNEL_ROUTES}'
+      FREECOMPUTE_TUNNEL_ROUTES: "${FREECOMPUTE_TUNNEL_ROUTES:-[{\"id\":\"web\",\"protocol\":\"http\",\"target\":\"http://localhost:3000\"},{\"id\":\"api\",\"protocol\":\"http\",\"target\":\"http://localhost:8081\"},{\"id\":\"vm-http\",\"protocol\":\"http\",\"target\":\"http://localhost:8082\"},{\"id\":\"vm-ws\",\"protocol\":\"websocket\",\"target\":\"http://localhost:8082\"},{\"id\":\"vm-ssh\",\"protocol\":\"ssh\",\"target\":\"agent\"},{\"id\":\"vm-tcp\",\"protocol\":\"tcp\",\"target\":\"agent\"},{\"id\":\"vm-udp\",\"protocol\":\"udp\",\"target\":\"localhost:30000\"},{\"id\":\"rtc\",\"protocol\":\"webrtc\",\"listen\":\"0.0.0.0:8443\"},{\"id\":\"p2p-signal\",\"protocol\":\"p2p\",\"target\":\"\"},{\"id\":\"game-udp\",\"protocol\":\"udp\",\"listen\":\"0.0.0.0:30001\",\"target\":\"localhost:30001\"}]}"
       FREECOMPUTE_GATEWAY_SHUTDOWN_SECONDS: "5"
       FREECOMPUTE_TUNNEL_DIAL_SECONDS: "3"
       FREECOMPUTE_TUNNEL_AGENT_WAIT_SECONDS: "5"
@@ -37,11 +37,10 @@ services:
       FREECOMPUTE_EDGE_HOSTNAME: "${FREECOMPUTE_EDGE_HOSTNAME:-edge.freecompute.io}"
       FREECOMPUTE_API_HOSTNAME: "${FREECOMPUTE_API_HOSTNAME:-api.freecompute.io}"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
+      test: ["CMD", "nc", "-z", "localhost", "8080"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
     networks:
       - freecompute
 
@@ -78,7 +77,7 @@ services:
       FREECOMPUTE_VM_GPU_VRAM: "${FREECOMPUTE_VM_GPU_VRAM:-0}"
       FREECOMPUTE_VM_CPUCORES: "${FREECOMPUTE_VM_CPUCORES:-8}"
       FREECOMPUTE_VM_RAMGB: "${FREECOMPUTE_VM_RAMGB:-32}"
-      FREECOMPUTE_VM_STORAGEGB: "${FREECOMPUTE_VM_STORAGEGB:-500}"
+      FREECOMPUTE_VM_STORAGEGB: "${FREECOMPUTE_VM_STORAGEGB:-10}"
       FREECOMPUTE_VM_ENABLE_WEBRTC: "${FREECOMPUTE_VM_ENABLE_WEBRTC:-true}"
       FREECOMPUTE_VM_ENABLE_GAMING: "${FREECOMPUTE_VM_ENABLE_GAMING:-true}"
       FREECOMPUTE_VM_ENABLE_REMOTE_SUPPORT: "${FREECOMPUTE_VM_ENABLE_REMOTE_SUPPORT:-true}"

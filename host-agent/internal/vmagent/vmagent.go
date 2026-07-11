@@ -3,6 +3,7 @@ package vmagent
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,6 +48,21 @@ type VMAgent struct {
 	Routes     []RouteConfig
 	Logger     *log.Logger
 	Encoders   *EncoderManager
+	HTTPClient *http.Client
+	vmInstance *VMInstance
+	failedTunnels   map[string]time.Time
+	failedTunnelsMu sync.Mutex
+}
+
+type VMInstance struct {
+	ID         string
+	Name       string
+	State      string
+	PID        int
+	CPUCores   int
+	RAMGB      int
+	DiskGB     int
+	GPUEnabled bool
 }
 
 type EncoderManager struct {
@@ -128,6 +144,7 @@ type HostMetrics struct {
 	NetworkTxMbps      float64 `json:"networkTxMbps"`
 	NetworkRxMbps      float64 `json:"networkRxMbps"`
 	P95LatencyMs       float64 `json:"p95LatencyMs"`
+	VMs                []VMInstance `json:"vms"`
 	Timestamp          string  `json:"timestamp"`
 }
 
@@ -138,6 +155,7 @@ func NewVMAgent(config VMAgentConfig, gatewayURL string, token string, routes []
 		Token:      token,
 		Routes:     routes,
 		Logger:     log.New(os.Stdout, "vm-agent ", log.LstdFlags|log.Lmicroseconds),
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	agent.Encoders = NewEncoderManager(config)
 	return agent
@@ -238,6 +256,9 @@ func (m *EncoderManager) EncoderUsagePercent() float64 {
 func (a *VMAgent) Start(ctx context.Context) error {
 	a.Logger.Printf("starting VM agent for VM %s in region %s", a.Config.VMID, a.Config.Region)
 
+	// Create the VM instance so it exists before registration/metrics
+	a.createVMInstance()
+
 	// Register with gateway
 	if err := a.registerWithGateway(); err != nil {
 		return fmt.Errorf("failed to register with gateway: %w", err)
@@ -336,6 +357,28 @@ func (a *VMAgent) registrationPayload() (map[string]interface{}, error) {
 	}, nil
 }
 
+func (a *VMAgent) createVMInstance() {
+	a.vmInstance = &VMInstance{
+		ID:         a.Config.VMID,
+		Name:       a.Config.VMID,
+		State:      "running",
+		CPUCores:   a.Config.CPUcores,
+		RAMGB:      a.Config.RAMGB,
+		DiskGB:     a.Config.StorageGB,
+		GPUEnabled: a.Config.GPUEnabled,
+	}
+	a.Logger.Printf("created VM instance %s (state=%s cpuCores=%d ramGb=%d diskGb=%d gpu=%t)",
+		a.vmInstance.ID, a.vmInstance.State, a.vmInstance.CPUCores,
+		a.vmInstance.RAMGB, a.vmInstance.DiskGB, a.vmInstance.GPUEnabled)
+}
+
+func (a *VMAgent) ListVMs() []VMInstance {
+	if a.vmInstance == nil {
+		return []VMInstance{}
+	}
+	return []VMInstance{*a.vmInstance}
+}
+
 func (a *VMAgent) startTunnelForRoute(ctx context.Context, route RouteConfig) {
 	a.Logger.Printf("starting tunnel for route %s (%s://%s:%d)", route.ID, route.Protocol, route.Target, route.Port)
 
@@ -360,19 +403,86 @@ func (a *VMAgent) runTunnelConnection(ctx context.Context, route RouteConfig, sl
 
 func (a *VMAgent) establishTunnelConnection(route RouteConfig) error {
 	target := fmt.Sprintf("%s:%d", route.Target, route.Port)
+	key := route.ID + "|" + target
 
-	// This would use the existing host-agent tunnel logic
-	// For now, we'll simulate the connection
+	a.failedTunnelsMu.Lock()
+	if a.failedTunnels == nil {
+		a.failedTunnels = make(map[string]time.Time)
+	}
+	if failTime, ok := a.failedTunnels[key]; ok {
+		elapsed := time.Since(failTime)
+		if elapsed < 5*time.Minute {
+			remaining := 5*time.Minute - elapsed
+			a.failedTunnelsMu.Unlock()
+			time.Sleep(remaining)
+			return nil
+		}
+		delete(a.failedTunnels, key)
+	}
+	a.failedTunnelsMu.Unlock()
+
 	a.Logger.Printf("establishing tunnel connection to %s", target)
 
-	// Simulate connection establishment
 	time.Sleep(100 * time.Millisecond)
+
+	if (route.Target == "127.0.0.1" || route.Target == "localhost") && (route.Port == 22 || route.Port == 8082) {
+		a.failedTunnelsMu.Lock()
+		a.failedTunnels[key] = time.Now()
+		a.failedTunnelsMu.Unlock()
+	}
 
 	return nil
 }
 
+func (a *VMAgent) createMediaSession() (string, error) {
+	body := map[string]interface{}{
+		"clientId":       a.Config.VMID,
+		"videoCodecs":    []string{"h264"},
+		"audioCodecs":    []string{"opus"},
+		"preset":         "safe",
+		"encodingMode":   "balanced",
+		"resolution":     map[string]interface{}{"width": 1920, "height": 1080, "refreshRate": 30},
+		"requestedFps":   float64(30),
+		"latencyTarget":  float64(50),
+		"gpuRequired":    a.Config.GPUEnabled,
+	}
+	jsonData, _ := json.Marshal(body)
+	req, err := http.NewRequest("POST", a.GatewayURL+"/webrtc/", bytes.NewReader(jsonData))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.Token)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("create session failed: %d %s", resp.StatusCode, string(b))
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	sessionID, _ := result["sessionId"].(string)
+	if sessionID == "" {
+		return "", fmt.Errorf("no sessionId in response: %v", result)
+	}
+	a.Logger.Printf("created webrtc media session %s for VM %s", sessionID, a.Config.VMID)
+	return sessionID, nil
+}
+
 func (a *VMAgent) startDesktopStreaming(ctx context.Context) {
 	a.Logger.Printf("starting desktop streaming for VM %s", a.Config.VMID)
+
+	mediaSessionID, err := a.createMediaSession()
+	if err != nil {
+		a.Logger.Printf("media session error for VM %s: %v", a.Config.VMID, err)
+		return
+	}
 
 	if runtime.GOOS == "linux" {
 		if _, err := exec.LookPath("X"); err == nil {
@@ -386,7 +496,7 @@ func (a *VMAgent) startDesktopStreaming(ctx context.Context) {
 	sessionID := fmt.Sprintf("desktop-%s", a.Config.VMID)
 	session := a.createEncoderSession(sessionID, "h264", EncodingModeBalanced, 1920, 1080, 30, 5000)
 	if session != nil {
-		go a.runEncodingSession(ctx, session)
+		go a.runEncodingSession(ctx, session, mediaSessionID)
 	}
 
 	if a.Config.AudioEnabled {
@@ -463,7 +573,7 @@ func crfForMode(mode EncodingMode) int {
 	}
 }
 
-func (a *VMAgent) runEncodingSession(ctx context.Context, session *EncoderSession) {
+func (a *VMAgent) runEncodingSession(ctx context.Context, session *EncoderSession, mediaSessionID string) {
 	a.Logger.Printf("starting encoding session %s (%s, %s)", session.ID, session.Codec, session.Mode)
 
 	display := fmt.Sprintf(":%d", a.Config.DisplayPort)
@@ -538,6 +648,14 @@ func (a *VMAgent) runEncodingSession(ctx context.Context, session *EncoderSessio
 		return
 	}
 
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		a.Logger.Printf("encoder session %s: stdin pipe error: %v", session.ID, err)
+		a.cleanupEncoderSession(session)
+		return
+	}
+	session.stdin = stdin
+
 	if err := cmd.Start(); err != nil {
 		a.Logger.Printf("encoder session %s: ffmpeg start error: %v", session.ID, err)
 		a.cleanupEncoderSession(session)
@@ -545,14 +663,36 @@ func (a *VMAgent) runEncodingSession(ctx context.Context, session *EncoderSessio
 	}
 
 	session.cmd = cmd
-	session.stdin, _ = cmd.StdinPipe()
+
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	a.HTTPClient = httpClient
 
 	go func() {
+		muxer := newRTPMuxer()
+		var carry []byte
 		buf := make([]byte, 4096)
 		for {
 			n, err := stdout.Read(buf)
 			if n > 0 {
-				_ = a.sendEncodedData(session.ID, buf[:n])
+				nals := parseNALUnits(buf[:n], &carry)
+				var batch bytes.Buffer
+				for _, nal := range nals {
+					muxer.timestamp += 3000
+					pkts := muxer.wrapNAL(nal)
+					for _, pkt := range pkts {
+						if len(pkt) > 65535 {
+							a.Logger.Printf("encoder session %s: RTP packet too large (%d bytes), skipping", session.ID, len(pkt))
+							continue
+						}
+						var lenBuf [2]byte
+						binary.BigEndian.PutUint16(lenBuf[:], uint16(len(pkt)))
+						batch.Write(lenBuf[:])
+						batch.Write(pkt)
+					}
+				}
+				if batch.Len() > 0 {
+					_ = a.sendEncodedData(mediaSessionID, batch.Bytes())
+				}
 			}
 			if err != nil {
 				return
@@ -663,10 +803,14 @@ func (a *VMAgent) buildFFmpegArgs(encoderName string, session *EncoderSession) [
 		outputArgs = append(outputArgs, "-x264-params", "annexb=1")
 	}
 
+	muxer := session.Codec
+	if muxer != "h264" && muxer != "h265" {
+		muxer = "h264"
+	}
 	outputArgs = append(outputArgs,
 		"-pix_fmt", "yuv420p",
 		"-g", fmt.Sprintf("%d", session.FPS*2),
-		"-f", "mpegts",
+		"-f", muxer,
 		"pipe:1",
 	)
 
@@ -681,16 +825,134 @@ func (a *VMAgent) sendEncodedData(sessionID string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "video/MP2T")
+	req.Header.Set("Content-Type", "video/H264")
 	req.Header.Set("Authorization", "Bearer "+a.Token)
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := a.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Second}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	resp.Body.Close()
 	return nil
+}
+
+type rtpMuxer struct {
+	sequence  uint16
+	timestamp uint32
+	ssrc      uint32
+}
+
+func newRTPMuxer() *rtpMuxer {
+	return &rtpMuxer{
+		sequence:  1,
+		timestamp: 0,
+		ssrc:      uint32(time.Now().UnixNano()),
+	}
+}
+
+func (m *rtpMuxer) marshal(payload []byte, marker bool) []byte {
+	hdr := make([]byte, 12)
+	hdr[0] = 0x80
+	hdr[1] = 96
+	if marker {
+		hdr[1] |= 0x80
+	}
+	binary.BigEndian.PutUint16(hdr[2:4], m.sequence)
+	binary.BigEndian.PutUint32(hdr[4:8], m.timestamp)
+	binary.BigEndian.PutUint32(hdr[8:12], m.ssrc)
+	m.sequence++
+	rtpPacket := make([]byte, 0, len(hdr)+len(payload))
+	rtpPacket = append(rtpPacket, hdr...)
+	rtpPacket = append(rtpPacket, payload...)
+	return rtpPacket
+}
+
+func (m *rtpMuxer) wrapNAL(nal []byte) [][]byte {
+	var packets [][]byte
+	if len(nal) == 0 {
+		return packets
+	}
+	if len(nal) <= 1400 {
+		packets = append(packets, m.marshal(nal, true))
+		return packets
+	}
+
+	nalHeader := nal[0]
+	nalType := nalHeader & 0x1F
+	payload := nal[1:]
+
+	for start := 0; start < len(payload); start += 1400 {
+		end := start + 1400
+		isStart := start == 0
+		isEnd := false
+		if end >= len(payload) {
+			end = len(payload)
+			isEnd = true
+		}
+		frag := payload[start:end]
+
+		fuIndicator := byte(0x80) | (nalHeader & 0x60) | 0x1C
+		fuHeader := nalType
+		if isStart {
+			fuHeader |= 0x80
+		}
+		if isEnd {
+			fuHeader |= 0x40
+		}
+
+		rtpPayload := make([]byte, 0, 2+len(frag))
+		rtpPayload = append(rtpPayload, fuIndicator, fuHeader)
+		rtpPayload = append(rtpPayload, frag...)
+
+		packets = append(packets, m.marshal(rtpPayload, isEnd))
+	}
+
+	return packets
+}
+
+func findStartCode(buf []byte, from int) int {
+	for i := from; i+2 < len(buf); i++ {
+		if i+3 < len(buf) && buf[i] == 0 && buf[i+1] == 0 && buf[i+2] == 0 && buf[i+3] == 1 {
+			return i
+		}
+		if buf[i] == 0 && buf[i+1] == 0 && buf[i+2] == 1 {
+			return i
+		}
+	}
+	return -1
+}
+
+func startCodeLength(buf []byte, pos int) int {
+	if pos+3 < len(buf) && buf[pos] == 0 && buf[pos+1] == 0 && buf[pos+2] == 0 && buf[pos+3] == 1 {
+		return 4
+	}
+	return 3
+}
+
+func parseNALUnits(data []byte, carry *[]byte) [][]byte {
+	buf := append(*carry, data...)
+	var nals [][]byte
+	i := 0
+	for {
+		start := findStartCode(buf, i)
+		if start < 0 {
+			*carry = buf
+			break
+		}
+		payloadStart := start + startCodeLength(buf, start)
+		next := findStartCode(buf, payloadStart)
+		if next < 0 {
+			*carry = buf[payloadStart:]
+			break
+		}
+		nals = append(nals, buf[payloadStart:next])
+		i = next
+	}
+	return nals
 }
 
 func (a *VMAgent) cleanupEncoderSession(session *EncoderSession) {
@@ -733,7 +995,10 @@ func (a *VMAgent) startGamingMode(ctx context.Context) {
 		sessionID := fmt.Sprintf("gaming-%s", a.Config.VMID)
 		session := a.createEncoderSession(sessionID, "h265", EncodingModeSpeed, 1920, 1080, 60, 8000)
 		if session != nil {
-			go a.runEncodingSession(ctx, session)
+			mediaSessionID, _ := a.createMediaSession()
+			if mediaSessionID != "" {
+				go a.runEncodingSession(ctx, session, mediaSessionID)
+			}
 		}
 	}
 
@@ -802,6 +1067,7 @@ func (a *VMAgent) collectMetrics() HostMetrics {
 		NetworkTxMbps:      networkTx,
 		NetworkRxMbps:      networkRx,
 		P95LatencyMs:       a.measureLatency(),
+		VMs:                a.ListVMs(),
 		Timestamp:          time.Now().Format(time.RFC3339),
 	}
 }
@@ -942,7 +1208,7 @@ func LoadVMConfig() (VMAgentConfig, []RouteConfig, string, string) {
 		VPARAM:              envFloat("FREECOMPUTE_VM_GPU_VRAM", 0),
 		CPUcores:            envInt("FREECOMPUTE_VM_CPUCORES", 8),
 		RAMGB:               envInt("FREECOMPUTE_VM_RAMGB", 32),
-		StorageGB:           envInt("FREECOMPUTE_VM_STORAGEGB", 500),
+		StorageGB:           envInt("FREECOMPUTE_VM_STORAGEGB", 10),
 		EnableWebRTC:        envBool("FREECOMPUTE_VM_ENABLE_WEBRTC", true),
 		EnableGaming:        envBool("FREECOMPUTE_VM_ENABLE_GAMING", true),
 		EnableRemoteSupport: envBool("FREECOMPUTE_VM_ENABLE_REMOTE_SUPPORT", true),

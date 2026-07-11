@@ -7,7 +7,7 @@ How `apps/file-service` running on a configured cloud VM becomes the storage bac
 ## 1. Goal & Requirements
 
 - **Pluggable storage backend**: User drive files live on a file-service instance running on a cloud VM, reachable through the gateway's universal proxy / agent tunnel, rather than only on the local gateway disk.
-- **100 GB per-user quota**: Hard-capped at 107,374,182,400 bytes, enforced server-side on every upload.
+- **10 GB per-user quota**: Hard-capped at 10,737,418,240 bytes, enforced server-side on every upload.
 - **Consistency & replication**: The file-service is the source of truth for drive bytes; the gateway StorageManager caches metadata and coordinates access.
 - **Do not duplicate** `docs/WEBOS_CLOUD_DRIVE.md`; this doc focuses on the cloud-VM deployment path and agent-tunnel integration.
 
@@ -46,7 +46,7 @@ Not a stub. It is a standalone HTTP service with a pluggable `Storage` interface
 
 ### Existing quota enforcement
 
-`apps/gateway/internal/auth/auth.go:267-289` (`CheckStorageQuota` / `AddStorageUsed`) enforces the 100 GB cap. `StorageManager.SetQuotaCheck` and `SetUsageFunc` are wired at gateway startup (`server.go:212-217`). No changes are needed to the quota logic itself.
+`apps/gateway/internal/auth/auth.go:267-289` (`CheckStorageQuota` / `AddStorageUsed`) enforces the 10 GB cap. `StorageManager.SetQuotaCheck` and `SetUsageFunc` are wired at gateway startup (`server.go:212-217`). No changes are needed to the quota logic itself.
 
 ---
 
@@ -102,7 +102,7 @@ The file-service continues to own:
 
 The gateway continues to own:
 - End-user authentication and `userId` injection (`storageAuth` in `server.go:314-326`).
-- 100 GB quota enforcement via `quotaFn` / `usageFn`.
+- 10 GB quota enforcement via `quotaFn` / `usageFn`.
 - Session-scoped routing and the agent pool.
 
 ---
@@ -145,6 +145,6 @@ If multi-region redundancy is required, the file-service's S3 backend provides o
 
 - [ ] Upload a 1 KB file as user A through the WebOS Files app → file lands on the cloud VM's local disk (or S3), not on the gateway's `/tmp/freecompute-storage`.
 - [ ] List files as user A → returns only user A's files (userId isolation preserved through the proxy).
-- [ ] Upload until total reaches 100 GB → subsequent upload returns `507 Insufficient Storage` with `{"error":"storage quota exceeded"}` (quota enforced by gateway before proxying).
+- [ ] Upload until total reaches 10 GB → subsequent upload returns `507 Insufficient Storage` with `{"error":"storage quota exceeded"}` (quota enforced by gateway before proxying).
 - [ ] Stop the file-service process on the VM → next upload returns `502 Bad Gateway` from the gateway; restarting the file-service restores normal operation.
 - [ ] Gateway restart with `FREECOMPUTE_STORAGE_BACKEND=remote` → file-service is reachable through the existing agent tunnel; no new tunnel setup required.

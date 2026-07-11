@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -588,6 +589,26 @@ func (s *Server) GetSession(sessionID string) (*Session, error) {
 	return session, nil
 }
 
+func (s *Server) ListSessions() []map[string]interface{} {
+	s.sessionsMutex.RLock()
+	defer s.sessionsMutex.RUnlock()
+
+	sessions := make([]map[string]interface{}, 0, len(s.sessions))
+	for _, session := range s.sessions {
+		sessions = append(sessions, map[string]interface{}{
+			"id":             session.ID,
+			"state":          session.State,
+			"signalingUrl":   fmt.Sprintf("/signal/%s", session.ID),
+			"videoCodec":     session.VideoCodec,
+			"audioCodec":     session.AudioCodec,
+			"preset":         session.Preset,
+			"encodingMode":   session.EncodingMode,
+			"createdAt":      session.CreatedAt,
+		})
+	}
+	return sessions
+}
+
 func (s *Server) EndSession(sessionID string, reason string) error {
 	s.sessionsMutex.Lock()
 	session, exists := s.sessions[sessionID]
@@ -933,6 +954,14 @@ func (s *Server) getSTUNServers() []string {
 	return []string{"stun:stun.l.google.com:19302"}
 }
 
+func extractResourceID(path string) string {
+	parts := splitPath(path)
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
+}
+
 func extractSessionID(path string) string {
 	parts := splitPath(path)
 	if len(parts) >= 2 && parts[0] == "signal" {
@@ -977,7 +1006,7 @@ func generateSessionID() string {
 }
 
 func (s *Server) HandleMediaIngest(w http.ResponseWriter, r *http.Request) {
-	sessionID := extractSessionID(r.URL.Path)
+	sessionID := extractResourceID(r.URL.Path)
 	if sessionID == "" {
 		http.Error(w, "session ID required", http.StatusBadRequest)
 		return
@@ -1007,13 +1036,33 @@ func (s *Server) HandleMediaIngest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "video track not available", http.StatusServiceUnavailable)
 			return
 		}
-		buf := getRTPBuf()
-		defer putRTPBuf(buf)
-		buffer := *buf
+		var packetBuf [2]byte
 		for {
-			n, readErr := r.Body.Read(buffer)
-			if n > 0 {
-				if _, writeErr := videoTrack.Write(buffer[:n]); writeErr != nil {
+			// Read 2-byte length prefix
+			_, readErr := io.ReadFull(r.Body, packetBuf[:])
+			if readErr != nil {
+				if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+					break
+				}
+				s.logger.Printf("session %s video read error: %v", sessionID, readErr)
+				return
+			}
+			pktLen := int(binary.BigEndian.Uint16(packetBuf[:]))
+			if pktLen <= 0 || pktLen > 65535 {
+				s.logger.Printf("session %s invalid RTP packet length %d", sessionID, pktLen)
+				return
+			}
+
+			rtpBuf := getRTPBuf()
+			if len(*rtpBuf) < pktLen {
+				// Larger than pool buffer; allocate exact
+				exact := make([]byte, pktLen)
+				_, copyErr := io.ReadFull(r.Body, exact)
+				if copyErr != nil {
+					s.logger.Printf("session %s video read payload error: %v", sessionID, copyErr)
+					return
+				}
+				if _, writeErr := videoTrack.Write(exact); writeErr != nil {
 					if errors.Is(writeErr, io.ErrClosedPipe) || errors.Is(writeErr, io.EOF) {
 						return
 					}
@@ -1022,15 +1071,29 @@ func (s *Server) HandleMediaIngest(w http.ResponseWriter, r *http.Request) {
 				}
 				session.Mutex.Lock()
 				session.Stats.PacketsSent++
-				session.Stats.BytesSent += uint64(n)
+				session.Stats.BytesSent += uint64(pktLen)
 				session.Mutex.Unlock()
-			}
-			if readErr != nil {
-				if errors.Is(readErr, io.EOF) {
-					break
+			} else {
+				buf := *rtpBuf
+				_, copyErr := io.ReadFull(r.Body, buf[:pktLen])
+				if copyErr != nil {
+					putRTPBuf(rtpBuf)
+					s.logger.Printf("session %s video read payload error: %v", sessionID, copyErr)
+					return
 				}
-				http.Error(w, readErr.Error(), http.StatusInternalServerError)
-				return
+				if _, writeErr := videoTrack.Write(buf[:pktLen]); writeErr != nil {
+					putRTPBuf(rtpBuf)
+					if errors.Is(writeErr, io.ErrClosedPipe) || errors.Is(writeErr, io.EOF) {
+						return
+					}
+					s.logger.Printf("session %s video write error: %v", sessionID, writeErr)
+					return
+				}
+				putRTPBuf(rtpBuf)
+				session.Mutex.Lock()
+				session.Stats.PacketsSent++
+				session.Stats.BytesSent += uint64(pktLen)
+				session.Mutex.Unlock()
 			}
 		}
 		session.Mutex.RLock()
@@ -1083,7 +1146,7 @@ func (s *Server) HandleMediaIngest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) HandleDataIngest(w http.ResponseWriter, r *http.Request) {
-	sessionID := extractSessionID(r.URL.Path)
+	sessionID := extractResourceID(r.URL.Path)
 	if sessionID == "" {
 		http.Error(w, "session ID required", http.StatusBadRequest)
 		return
@@ -1126,7 +1189,7 @@ func (s *Server) HandleDataIngest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) HandleRequestKeyframe(w http.ResponseWriter, r *http.Request) {
-	sessionID := extractSessionID(r.URL.Path)
+	sessionID := extractResourceID(r.URL.Path)
 	if sessionID == "" {
 		http.Error(w, "session ID required", http.StatusBadRequest)
 		return

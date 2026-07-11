@@ -123,6 +123,7 @@ func (m *compressionMiddleware) Handler(next http.Handler) http.Handler {
 			return
 		}
 		cw := newCompressionWriter(w, encoding)
+		cw.Header().Set("Content-Encoding", encoding)
 		defer func() {
 			if err := cw.close(); err != nil && m.logger != nil {
 				m.logger.Printf("compression close error: %v", err)

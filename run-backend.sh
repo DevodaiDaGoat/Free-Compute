@@ -12,7 +12,7 @@ echo "Root: $ROOT"
 # ------------------------------------------------------------------
 # System tuning (requires root; best-effort otherwise)
 # ------------------------------------------------------------------
-if [ "$(id -u)" -eq 0 ]; then
+if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" -eq 0 ]; then
     sysctl -w net.core.rmem_max=16777216 2>/dev/null || true
     sysctl -w net.core.wmem_max=16777216 2>/dev/null || true
     sysctl -w net.ipv4.tcp_rmem='4096 87380 16777216' 2>/dev/null || true
@@ -29,7 +29,13 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 
 # Aggressive file descriptor limit for high connection counts
-ulimit -n 1000000 2>/dev/null || true
+# ulimit -n 1000000 2>/dev/null || true  # Linux-only; commented out for portability
+
+# ------------------------------------------------------------------
+# Storage directory (10GB per user)
+# ------------------------------------------------------------------
+mkdir -p ${TMPDIR:-/tmp}/freecompute-storage
+echo "  Storage: ${TMPDIR:-/tmp}/freecompute-storage (10GB per user)"
 
 # ------------------------------------------------------------------
 # Gateway
@@ -38,18 +44,7 @@ export FREECOMPUTE_GATEWAY_ADDR="${FREECOMPUTE_GATEWAY_ADDR:-:8080}"
 export FREECOMPUTE_TUNNEL_TOKEN="${FREECOMPUTE_TUNNEL_TOKEN:-dev-token}"
 
 # Tunnel routes - configure for universal proxy
-export FREECOMPUTE_TUNNEL_ROUTES="${FREECOMPUTE_TUNNEL_ROUTES:-[
-  {\"id\":\"web\",\"protocol\":\"http\",\"target\":\"http://localhost:3000\"},
-  {\"id\":\"api\",\"protocol\":\"http\",\"target\":\"http://localhost:8081\"},
-  {\"id\":\"vm-http\",\"protocol\":\"http\",\"target\":\"http://localhost:8082\"},
-  {\"id\":\"vm-ws\",\"protocol\":\"websocket\",\"target\":\"http://localhost:8082\"},
-  {"id":"vm-ssh","protocol":"ssh","target":"agent"},
-  {\"id\":\"vm-tcp\",\"protocol\":\"tcp\",\"target\":\"agent\"},
-  {\"id\":\"vm-udp\",\"protocol\":\"udp\",\"target\":\"localhost:30000\"},
-  {\"id\":\"rtc\",\"protocol\":\"webrtc\",\"listen\":\"0.0.0.0:8443\"},
-  {\"id\":\"p2p-signal\",\"protocol\":\"p2p\",\"target\":\"\"},
-  {\"id\":\"game-udp\",\"protocol\":\"udp\",\"listen\":\"0.0.0.0:30001\",\"target\":\"localhost:30001\"}
-]}"
+export FREECOMPUTE_TUNNEL_ROUTES="${FREECOMPUTE_TUNNEL_ROUTES:-[{\"id\":\"web\",\"protocol\":\"http\",\"target\":\"http://localhost:3000\"},{\"id\":\"api\",\"protocol\":\"http\",\"target\":\"http://localhost:8081\"},{\"id\":\"vm-http\",\"protocol\":\"http\",\"target\":\"http://localhost:8082\"},{\"id\":\"vm-ws\",\"protocol\":\"websocket\",\"target\":\"http://localhost:8082\"},{\"id\":\"vm-ssh\",\"protocol\":\"ssh\",\"target\":\"agent\"},{\"id\":\"vm-tcp\",\"protocol\":\"tcp\",\"target\":\"agent\"},{\"id\":\"vm-udp\",\"protocol\":\"udp\",\"target\":\"localhost:30000\"},{\"id\":\"rtc\",\"protocol\":\"webrtc\",\"listen\":\"0.0.0.0:8443\"},{\"id\":\"p2p-signal\",\"protocol\":\"p2p\",\"target\":\"\"},{\"id\":\"game-udp\",\"protocol\":\"udp\",\"listen\":\"0.0.0.0:30001\",\"target\":\"localhost:30001\"}]}"
 
 # Performance timeouts (optimized for BunnyCDN)
 export FREECOMPUTE_GATEWAY_SHUTDOWN_SECONDS="${FREECOMPUTE_GATEWAY_SHUTDOWN_SECONDS:-5}"
@@ -77,7 +72,7 @@ export FREECOMPUTE_TCP_BUFFER_SIZE="${FREECOMPUTE_TCP_BUFFER_SIZE:-8388608}"
 export FREECOMPUTE_UDP_BUFFER_SIZE="${FREECOMPUTE_UDP_BUFFER_SIZE:-16777216}"
 
 # Database
-export FREECOMPUTE_DB_PATH="${FREECOMPUTE_DB_PATH:-/tmp/freecompute.db}"
+export FREECOMPUTE_DB_PATH="${FREECOMPUTE_DB_PATH:-${TMPDIR:-/tmp}/freecompute.db}"
 
 # Optional LLM moderation (empty = heuristic only)
 export FREECOMPUTE_MODERATION_LLM_URL="${FREECOMPUTE_MODERATION_LLM_URL:-}"
@@ -93,7 +88,7 @@ export FREECOMPUTE_EDGE_HOSTNAME="${FREECOMPUTE_EDGE_HOSTNAME:-edge.freecompute.
 export FREECOMPUTE_API_HOSTNAME="${FREECOMPUTE_API_HOSTNAME:-api.freecompute.io}"
 
 # Go runtime tuning for throughput
-export GOMAXPROCS="${GOMAXPROCS:-$(nproc)}"
+export GOMAXPROCS="${GOMAXPROCS:-$(go env GOMAXPROCS 2>/dev/null || echo 4)}"
 export GOGC="${GOGC:-200}"
 export GOMEMLIMIT="${GOMEMLIMIT:-4GiB}"
 
@@ -109,6 +104,12 @@ export FREECOMPUTE_AGENT_ROUTES="${FREECOMPUTE_AGENT_ROUTES:-[
 export FREECOMPUTE_AGENT_DIAL_SECONDS="${FREECOMPUTE_AGENT_DIAL_SECONDS:-5}"
 export FREECOMPUTE_AGENT_RECONNECT_SECONDS="${FREECOMPUTE_AGENT_RECONNECT_SECONDS:-1}"
 export FREECOMPUTE_AGENT_INSECURE_SKIP_TLS="${FREECOMPUTE_AGENT_INSECURE_SKIP_TLS:-0}"
+
+# VM Setup agent
+# ------------------------------------------------------------------
+export FREECOMPUTE_VM_ID="${FREECOMPUTE_VM_ID:-local-vm-1}"
+export FREECOMPUTE_VM_REGION="${FREECOMPUTE_VM_REGION:-local}"
+export FREECOMPUTE_VM_STORAGEGB="${FREECOMPUTE_VM_STORAGEGB:-10}"
 
 # ------------------------------------------------------------------
 # Cleanup trap
@@ -128,21 +129,21 @@ trap cleanup EXIT INT TERM
 # ------------------------------------------------------------------
 echo ""
 echo "[1] Building gateway + host-agent in parallel..."
-(cd "$ROOT/apps/gateway" && go build -buildvcs=false -o /tmp/freecompute-gateway ./cmd/gateway) &
-(cd "$ROOT/host-agent" && go build -buildvcs=false -o /tmp/freecompute-host-agent ./cmd/host-agent) &
+(cd "$ROOT/apps/gateway" && go build -buildvcs=false -o ${TMPDIR:-/tmp}/freecompute-gateway ./cmd/gateway) &
+(cd "$ROOT/host-agent" && go build -buildvcs=false -o ${TMPDIR:-/tmp}/freecompute-host-agent ./cmd/host-agent) &
 wait
 
 # ------------------------------------------------------------------
 # Build VM setup agent
 # ------------------------------------------------------------------
 echo "[2] Building vm-setup agent..."
-(cd "$ROOT/host-agent" && go build -buildvcs=false -o /tmp/freecompute-vm-setup ./cmd/vm-setup) || echo "  vm-setup build skipped (optional)"
+(cd "$ROOT/host-agent" && go build -buildvcs=false -o ${TMPDIR:-/tmp}/freecompute-vm-setup ./cmd/vm-setup)
 
 # ------------------------------------------------------------------
 # Start Gateway
 # ------------------------------------------------------------------
 echo "[3] Starting gateway on $FREECOMPUTE_GATEWAY_ADDR..."
-/tmp/freecompute-gateway &
+${TMPDIR:-/tmp}/freecompute-gateway &
 GATEWAY_PID=$!
 sleep 0.2
 
@@ -164,9 +165,19 @@ fi
 # Start Host Agent
 # ------------------------------------------------------------------
 echo "[4] Starting host-agent..."
-/tmp/freecompute-host-agent &
+${TMPDIR:-/tmp}/freecompute-host-agent &
 AGENT_PID=$!
 echo "  Agent started (PID $AGENT_PID)"
+
+# ------------------------------------------------------------------
+# Start vm-setup agent
+# ------------------------------------------------------------------
+echo "[4a] Starting vm-setup agent..."
+export FREECOMPUTE_GATEWAY_URL="http://localhost${FREECOMPUTE_GATEWAY_ADDR}"
+export FREECOMPUTE_AGENT_TOKEN="${FREECOMPUTE_TUNNEL_TOKEN:-dev-token}"
+${TMPDIR:-/tmp}/freecompute-vm-setup &
+VM_SETUP_PID=$!
+echo "  vm-setup started (PID $VM_SETUP_PID)"
 
 # ------------------------------------------------------------------
 # Test endpoints
@@ -216,6 +227,7 @@ echo "  Capabilities: http://localhost${FREECOMPUTE_GATEWAY_ADDR}/capabilities"
 echo "  Routes:     http://localhost${FREECOMPUTE_GATEWAY_ADDR}/routes"
 echo ""
 echo "Host Agent:   PID $AGENT_PID (connected to gateway)"
+echo "vm-setup:     PID $VM_SETUP_PID"
 echo ""
 echo "Auth endpoints:"
 echo "  POST /auth/register  | POST /auth/login"
@@ -257,7 +269,7 @@ echo "  CDN:  ${FREECOMPUTE_CDN_HOSTNAME}"
 echo "  Edge: ${FREECOMPUTE_EDGE_HOSTNAME}"
 echo "  API:  ${FREECOMPUTE_API_HOSTNAME}"
 echo ""
-echo "Storage: 100GB per user (local: /tmp/freecompute-storage/)"
+echo "Storage: 10GB per user (local: ${TMPDIR:-/tmp}/freecompute-storage/)"
 echo ""
 echo "Press Ctrl+C to stop all services."
 echo ""

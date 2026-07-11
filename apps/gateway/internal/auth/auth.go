@@ -166,7 +166,7 @@ func (m *AuthManager) Register(email, password, displayName string) (*User, *Tok
 		PasswordHash: string(hash),
 		DisplayName:  displayName,
 		Verified:     true,
-		StorageQuota: 100 * 1024 * 1024 * 1024,
+		StorageQuota: 10 * 1024 * 1024 * 1024,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -181,7 +181,7 @@ func (m *AuthManager) Register(email, password, displayName string) (*User, *Tok
 			PasswordHash: string(hash),
 			DisplayName:  displayName,
 			Verified:     true,
-			StorageQuota: 100 * 1024 * 1024 * 1024,
+			StorageQuota: 10 * 1024 * 1024 * 1024,
 		Role:         user.Role,
 			CreatedAt:    now,
 			UpdatedAt:    now,

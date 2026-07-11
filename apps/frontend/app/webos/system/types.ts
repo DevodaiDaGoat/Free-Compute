@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 export interface AppWindow {
   id: string;
   title: string;
@@ -15,7 +17,7 @@ export interface AppWindow {
 export interface DesktopApp {
   id: string;
   name: string;
-  icon: string;
+  icon: ReactNode;
 }
 
 export type StreamPreset = 'safe' | 'fast';

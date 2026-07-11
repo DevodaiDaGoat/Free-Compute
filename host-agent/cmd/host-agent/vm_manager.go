@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -94,11 +95,19 @@ func (m *VMManager) StopVM(vmID string) error {
 		return fmt.Errorf("VM %s not found", vmID)
 	}
 
-	cmd := exec.Command("qemu-system-x86_64", "-monitor", "unix:"+vm.SocketPath+",server,nowait", "-system-powerdown")
-	if err := cmd.Run(); err != nil {
-		proc, _ := os.FindProcess(vm.PID)
-		if proc != nil {
-			proc.Signal(os.Interrupt)
+	monitorArg := "unix:" + vm.SocketPath + ",server,nowait"
+	if runtime.GOOS == "windows" {
+		monitorArg = fmt.Sprintf("tcp:127.0.0.1:%d,server,nowait", 4444)
+	}
+	cmd := exec.Command("qemu-system-x86_64", "-monitor", monitorArg, "-system-powerdown")
+	_ = cmd.Run()
+
+	proc, _ := os.FindProcess(vm.PID)
+	if proc != nil {
+		if runtime.GOOS == "windows" {
+			_ = proc.Kill()
+		} else {
+			_ = proc.Signal(os.Interrupt)
 		}
 	}
 
@@ -147,21 +156,45 @@ func (m *VMManager) buildQEMUArgs(config VMConfig, socketPath string) []string {
 		"-name", config.Name,
 		"-m", fmt.Sprintf("%d", config.RAMMB),
 		"-smp", fmt.Sprintf("%d", config.CPUCores),
-		"-enable-kvm",
-		"-cpu", "host",
-		"-machine", "q35,accel=kvm",
+	}
+
+	if runtime.GOOS == "linux" {
+		args = append(args, "-enable-kvm", "-cpu", "host", "-machine", "q35,accel=kvm")
+	} else if runtime.GOOS == "darwin" {
+		args = append(args, "-cpu", "host", "-machine", "q35,accel=hvf")
+	} else {
+		args = append(args, "-cpu", "qemu64", "-machine", "q35")
+	}
+
+	args = append(args,
 		"-drive", fmt.Sprintf("file=%s,format=qcow2,if=virtio", config.DiskPath),
-		"-monitor", fmt.Sprintf("unix:%s,server,nowait", socketPath),
+	)
+
+	if runtime.GOOS == "windows" {
+		args = append(args, "-monitor", fmt.Sprintf("tcp:127.0.0.1:%d,server,nowait", config.MonitorPort))
+	} else {
+		args = append(args, "-monitor", fmt.Sprintf("unix:%s,server,nowait", socketPath))
+	}
+
+	args = append(args,
 		"-display", "none",
 		"-vga", "virtio",
 		"-device", "virtio-net-pci,netdev=net0",
 		"-netdev", "user,id=net0,hostfwd=tcp::2222-:22",
 		"-device", "virtio-serial-pci",
-		"-chardev", "socket,path=/tmp/freecompute-agent.sock,server=on,wait=off,id=agent0",
+	)
+
+	if runtime.GOOS == "windows" {
+		args = append(args, "-chardev", "socket,path="+filepath.Join(os.TempDir(), "freecompute-agent.sock")+",server=on,wait=off,id=agent0")
+	} else {
+		args = append(args, "-chardev", fmt.Sprintf("socket,path=/tmp/freecompute-agent.sock,server=on,wait=off,id=agent0"))
+	}
+
+	args = append(args,
 		"-device", "virtserialport,chardev=agent0,name=com.freecompute.agent.0",
 		"-device", "virtio-rng-pci",
 		"-snapshot",
-	}
+	)
 
 	if config.ISOPath != "" {
 		args = append(args, "-cdrom", config.ISOPath)
@@ -174,7 +207,7 @@ func (m *VMManager) buildQEMUArgs(config VMConfig, socketPath string) []string {
 		)
 	}
 
-	if config.MonitorPort > 0 {
+	if config.MonitorPort > 0 && runtime.GOOS == "windows" {
 		args = append(args, "-monitor", fmt.Sprintf("tcp:127.0.0.1:%d,server,nowait", config.MonitorPort))
 	}
 

@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { getGatewayUrl, getTokens } from '../../boot/BootSequence';
+import { Folder, FileText } from 'lucide-react';
+import { apiFetch, getTokens, getGatewayUrl } from '../../boot/BootSequence';
 
 interface FileItem {
   id: string;
@@ -25,17 +26,14 @@ export default function FilesApp() {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [currentPath, setCurrentPath] = useState('');
   const [loading, setLoading] = useState(false);
-  const [quota, setQuota] = useState({ used: 0, total: 107374182400 });
+  const [quota, setQuota] = useState({ used: 0, total: 10737418240 });
+  const [notification, setNotification] = useState<{type: 'success'|'error', message: string}|null>(null);
 
   const listFiles = useCallback(async (path: string) => {
     setLoading(true);
     try {
-      const tokens = getTokens();
-      if (!tokens) return;
-      const params = new URLSearchParams({ userId: tokens.accessToken, path });
-      const res = await fetch(`${getGatewayUrl()}/storage/list?${params}`);
-      if (!res.ok) throw new Error('Failed to list files');
-      const data = await res.json();
+      const params = new URLSearchParams({ path });
+      const data = await apiFetch(`/storage/list?${params}`);
       setFiles(data.files || []);
     } catch (err) {
       console.error('list files error:', err);
@@ -44,51 +42,83 @@ export default function FilesApp() {
     }
   }, []);
 
-  const uploadFile = useCallback(async (file: File) => {
+  const uploadFile = useCallback(async (path: string, file: File) => {
     try {
-      const tokens = getTokens();
-      if (!tokens) return;
-      const path = currentPath ? `${currentPath}/${file.name}` : file.name;
-      const params = new URLSearchParams({ userId: tokens.accessToken, path });
-      const res = await fetch(`${getGatewayUrl()}/storage/upload?${params}`, {
+      setLoading(true);
+      const params = new URLSearchParams({ path });
+      const token = getTokens()?.accessToken;
+      if (!token) throw new Error('Not authenticated');
+      const resp = await fetch(`${getGatewayUrl()}/storage/upload?${params}`, {
         method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
         body: file,
       });
-      if (!res.ok) throw new Error('Upload failed');
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => 'unknown');
+        throw new Error(`Upload failed (${resp.status}): ${text}`);
+      }
+      setNotification({ type: 'success', message: 'Uploaded' });
       listFiles(currentPath);
-    } catch (err) {
-      console.error('upload error:', err);
+    } catch (e: any) {
+      setNotification({ type: 'error', message: e.message || 'Upload failed' });
+    } finally {
+      setLoading(false);
     }
   }, [currentPath, listFiles]);
 
   const deleteFile = useCallback(async (filePath: string) => {
     try {
-      const tokens = getTokens();
-      if (!tokens) return;
-      const params = new URLSearchParams({ userId: tokens.accessToken, path: filePath });
-      const res = await fetch(`${getGatewayUrl()}/storage/delete?${params}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Delete failed');
+      const params = new URLSearchParams({ path: filePath });
+      await apiFetch(`/storage/delete?${params}`, { method: 'DELETE' });
       listFiles(currentPath);
     } catch (err) {
       console.error('delete error:', err);
     }
   }, [currentPath, listFiles]);
 
-  useEffect(() => { listFiles(''); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const profile = await apiFetch('/auth/profile');
+        if (!cancelled) {
+          setQuota({ used: profile.storageUsed, total: profile.storageQuota });
+        }
+      } catch {
+        if (!cancelled) {
+          setQuota({ used: 0, total: 10737418240 });
+        }
+      }
+      try {
+        await listFiles('');
+      } catch {
+        if (!cancelled) {
+          setFiles([]);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [listFiles]);
 
   const storagePercent = quota.total > 0 ? (quota.used / quota.total) * 100 : 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0d1117', color: '#ccc', fontFamily: 'system-ui, sans-serif' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: '#161b22', borderBottom: '1px solid #30363d' }}>
+      <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: '#161b22', borderBottom: '1px solid #30363d' }}>
         <span style={{ fontSize: 13, color: '#888' }}>Drive</span>
         <span style={{ fontSize: 12, color: '#444' }}>/</span>
         <span style={{ fontSize: 13 }}>{currentPath || '~'}</span>
         <div style={{ flex: 1 }} />
         <label style={{ padding: '4px 12px', background: '#238636', color: '#fff', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
           Upload
-          <input type="file" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadFile(f); }} />
+          <input type="file" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadFile('', f); }} />
         </label>
+        {notification && (
+          <div style={{
+            position: 'absolute', top: 8, right: 8, padding: '6px 12px', borderRadius: 4, fontSize: 12,
+            background: notification.type === 'success' ? '#238636' : '#f85149', color: '#fff', zIndex: 10,
+          }}>{notification.message}</div>
+        )}
       </div>
 
       <div style={{ flex: 1, overflow: 'auto' }}>
@@ -100,7 +130,7 @@ export default function FilesApp() {
         )}
         {files.map((file) => (
           <div key={file.id} style={{ display: 'flex', alignItems: 'center', padding: '8px 16px', borderBottom: '1px solid #21262d', fontSize: 13 }}>
-            <span style={{ marginRight: 8 }}>{file.isDir ? '📁' : '📄'}</span>
+            <span style={{ marginRight: 8 }}>{file.isDir ? <Folder size={14} color="#58a6ff" /> : <FileText size={14} color="#8b949e" />}</span>
             <span
               onClick={() => file.isDir && setCurrentPath(file.path)}
               style={{ cursor: file.isDir ? 'pointer' : 'default', flex: 1, color: file.isDir ? '#58a6ff' : '#ccc' }}
