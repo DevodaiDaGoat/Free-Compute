@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,14 +15,18 @@ const (
 	udpClientSweepInterval = 30 * time.Second
 )
 
-var udpSocketBufferSize = 32 * 1024 * 1024
+var udpSocketBufferSize atomic.Int64
+
+func init() {
+	udpSocketBufferSize.Store(32 * 1024 * 1024)
+}
 
 func SetUDPBufferSize(size int) {
 	if size > 0 {
 		if size > 64*1024*1024 {
 			size = 64 * 1024 * 1024
 		}
-		udpSocketBufferSize = size
+		udpSocketBufferSize.Store(int64(size))
 	}
 }
 
@@ -41,8 +46,9 @@ func (s *Server) serveUDP(ctx context.Context, route *Route) error {
 		return fmt.Errorf("listen udp route=%s addr=%s: %w", route.ID, route.Listen, err)
 	}
 	defer listener.Close()
-	_ = listener.SetReadBuffer(udpSocketBufferSize)
-	_ = listener.SetWriteBuffer(udpSocketBufferSize)
+	sockBuf := int(udpSocketBufferSize.Load())
+	_ = listener.SetReadBuffer(sockBuf)
+	_ = listener.SetWriteBuffer(sockBuf)
 	_ = setUDSocketOptions(listener, route.QoS)
 
 	s.logger.Printf("udp tunnel route=%s listening=%s target=%s", route.ID, route.Listen, route.Target)
@@ -58,7 +64,9 @@ func (s *Server) serveUDP(ctx context.Context, route *Route) error {
 
 	go clients.sweepLoop(ctx)
 
-	buf := make([]byte, maxUDPPacketSize)
+	bufPtr := getUDPBuf()
+	defer putUDPBuf(bufPtr)
+	buf := *bufPtr
 
 	for {
 		n, clientAddr, err := listener.ReadFromUDP(buf)
@@ -152,6 +160,15 @@ func (m *udpClientMap) sweep() {
 	}
 }
 
+// chooseUDPBufSize returns cfgSize if it is positive, otherwise falls back to
+// the provided default. This avoids setting the socket buffer size twice.
+func chooseUDPBufSize(cfgSize, fallback int) int {
+	if cfgSize > 0 {
+		return cfgSize
+	}
+	return fallback
+}
+
 func (s *Server) dialUDP(route *Route) (*net.UDPConn, error) {
 	targetAddr, err := net.ResolveUDPAddr("udp", route.Target)
 	if err != nil {
@@ -162,10 +179,9 @@ func (s *Server) dialUDP(route *Route) (*net.UDPConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = upstream.SetReadBuffer(udpSocketBufferSize)
-	_ = upstream.SetWriteBuffer(udpSocketBufferSize)
-	_ = upstream.SetReadBuffer(s.cfg.UDPBufferSize)
-	_ = upstream.SetWriteBuffer(s.cfg.UDPBufferSize)
+	bufSize := chooseUDPBufSize(s.cfg.UDPBufferSize, int(udpSocketBufferSize.Load()))
+	_ = upstream.SetReadBuffer(bufSize)
+	_ = upstream.SetWriteBuffer(bufSize)
 
 	return upstream, nil
 }
@@ -174,7 +190,9 @@ func (s *Server) copyUDPToClient(ctx context.Context, route *Route, listener *ne
 	defer cleanup()
 	defer upstream.Close()
 
-	buf := make([]byte, maxUDPPacketSize)
+	bufPtr := getUDPBuf()
+	defer putUDPBuf(bufPtr)
+	buf := *bufPtr
 	for {
 		_ = upstream.SetReadDeadline(time.Now().Add(route.IdleTimeout()))
 		n, err := upstream.Read(buf)

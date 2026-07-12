@@ -260,16 +260,41 @@ func (b *AudioBuffer) Write(data []byte) error {
 	defer b.mutex.Unlock()
 
 	n := len(data)
-	if n > b.size {
+	if n >= b.size {
+		// Fill the buffer with the tail. readPos moves to writePos+1 so the
+		// buffer is exactly full and Read returns size-1 bytes (classic ring
+		// discipline). The previous code left readPos at the old start after
+		// a full-buffer write, so subsequent reads reported 0 bytes.
 		data = data[n-b.size:]
-		n = len(data)
-	}
-	firstLen := copy(b.data[b.writePos:], data)
-	copy(b.data, data[firstLen:])
-	b.writePos = (b.writePos + n) % b.size
-	if n > 0 {
+		copy(b.data, data)
+		b.writePos = 0
+		if b.size > 0 {
+			b.readPos = 1 % b.size
+		}
 		b.ready = true
+		return nil
 	}
+	if n == 0 {
+		return nil
+	}
+	// Snapshot the pre-write available count so we can detect overtake by a
+	// simple bytes-available comparison instead of trying to reason about wrap
+	// arithmetic (the previous implementation had ambiguous precedence and
+	// admitted false positives/negatives on wrap boundaries).
+	writable := b.size - b.availableLocked()
+	overtook := b.ready && n >= writable
+
+	firstLen := copy(b.data[b.writePos:], data)
+	if firstLen < n {
+		copy(b.data, data[firstLen:])
+	}
+	b.writePos = (b.writePos + n) % b.size
+
+	if overtook {
+		// Push readPos forward so it never sits on freshly-overwritten bytes.
+		b.readPos = (b.writePos + 1) % b.size
+	}
+	b.ready = true
 	return nil
 }
 
@@ -281,7 +306,7 @@ func (b *AudioBuffer) Read(size int) ([]byte, error) {
 		return nil, io.EOF
 	}
 
-	available := b.Available()
+	available := b.availableLocked()
 	if available == 0 {
 		return nil, io.EOF
 	}
@@ -298,14 +323,19 @@ func (b *AudioBuffer) Read(size int) ([]byte, error) {
 	return result, nil
 }
 
-func (b *AudioBuffer) Available() int {
-	b.mutex.Lock()
-	defer b.mutex.Unlock()
-
+// availableLocked computes the number of bytes available to read.
+// Must be called with b.mutex held.
+func (b *AudioBuffer) availableLocked() int {
 	if b.writePos >= b.readPos {
 		return b.writePos - b.readPos
 	}
 	return b.size - b.readPos + b.writePos
+}
+
+func (b *AudioBuffer) Available() int {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return b.availableLocked()
 }
 
 func (b *AudioBuffer) Clear() {
@@ -352,6 +382,9 @@ func DetectSilence(data []byte, threshold int) bool {
 }
 
 func CalculateRMS(samples []float32) float32 {
+	if len(samples) == 0 {
+		return 0.0
+	}
 	sum := float32(0)
 	for _, sample := range samples {
 		sum += sample * sample

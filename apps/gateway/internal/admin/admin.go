@@ -27,6 +27,7 @@ type AdminManager struct {
 	authManager    *auth.AuthManager
 	detector       *security.SecurityDetector
 	settings       map[string]string
+	systemSettings SystemSettings
 	mu             sync.RWMutex
 	autoDetectDomain string
 }
@@ -46,15 +47,28 @@ type SystemSettings struct {
 	SessionTimeoutMinutes int    `json:"sessionTimeoutMinutes"`
 }
 
+func defaultSystemSettings() SystemSettings {
+	return SystemSettings{
+		MaxUsers:              1000,
+		DefaultStorageQuota:   10 * 1024 * 1024 * 1024,
+		ThreatDetection:       true,
+		AutoPauseOnThreat:     true,
+		RequireAIReview:       true,
+		MaxConcurrentSessions: 100,
+		SessionTimeoutMinutes: 60,
+	}
+}
+
 func NewAdminManager(logger *log.Logger, authManager *auth.AuthManager, detector *security.SecurityDetector) *AdminManager {
 	if logger == nil {
 		logger = log.Default()
 	}
 	return &AdminManager{
-		logger:      logger,
-		authManager: authManager,
-		detector:    detector,
-		settings:    make(map[string]string),
+		logger:         logger,
+		authManager:    authManager,
+		detector:       detector,
+		settings:       make(map[string]string),
+		systemSettings: defaultSystemSettings(),
 	}
 }
 
@@ -77,12 +91,30 @@ func generatePassword(n int) string {
 	return string(b)
 }
 
+// adminPasswordFile is the location of the auto-generated admin password.
+// Kept on disk so restarts don't lock the operator out.
+func adminPasswordFile() string {
+	if dir := os.Getenv("FREECOMPUTE_STATE_DIR"); dir != "" {
+		return dir + string(os.PathSeparator) + ".admin-password"
+	}
+	return ".freecompute-admin-password"
+}
+
 func (m *AdminManager) SeedAdmin() {
 	adminEmail := envOr("FREECOMPUTE_ADMIN_EMAIL", AdminEmail)
 	adminPassword := envOr("FREECOMPUTE_ADMIN_PASSWORD", "")
+	generated := false
+	// Prefer a previously persisted generated password so restarts don't
+	// re-generate and lock the operator out (Register would then collide
+	// with the existing email and the seed would silently fail).
+	if adminPassword == "" {
+		if b, readErr := os.ReadFile(adminPasswordFile()); readErr == nil {
+			adminPassword = strings.TrimSpace(string(b))
+		}
+	}
 	if adminPassword == "" {
 		adminPassword = generatePassword(16)
-		m.logger.Printf("generated admin password: %s", adminPassword)
+		generated = true
 	}
 	adminRole := envOr("FREECOMPUTE_ADMIN_ROLE", "admin")
 	_, _, err := m.authManager.Login(adminEmail, adminPassword)
@@ -106,40 +138,131 @@ func (m *AdminManager) SeedAdmin() {
 	})
 
 	_ = tokens
-	m.logger.Printf("admin user seeded: %s / %s", adminEmail, adminPassword)
+
+	// Persist the auto-generated password with 0600 permissions so restarts
+	// keep working. Only write when we generated it — never overwrite an
+	// operator-provided password from the env.
+	if generated {
+		if writeErr := os.WriteFile(adminPasswordFile(), []byte(adminPassword), 0600); writeErr != nil {
+			m.logger.Printf("could not persist admin password to %s: %v (set FREECOMPUTE_ADMIN_PASSWORD to avoid this)", adminPasswordFile(), writeErr)
+		}
+	}
+
+	// Only log the password when we generated it AND the operator opted in via
+	// FREECOMPUTE_LOG_ADMIN_PASSWORD=1. Otherwise print a hint instead so it
+	// does not end up in shipped log aggregators / journalctl by default.
+	if generated && os.Getenv("FREECOMPUTE_LOG_ADMIN_PASSWORD") == "1" {
+		m.logger.Printf("admin user seeded: %s / %s (set FREECOMPUTE_ADMIN_PASSWORD to control)", adminEmail, adminPassword)
+	} else if generated {
+		m.logger.Printf("admin user seeded: %s (password auto-generated to %s — set FREECOMPUTE_ADMIN_PASSWORD or FREECOMPUTE_LOG_ADMIN_PASSWORD=1 to see it)", adminEmail, adminPasswordFile())
+	} else {
+		m.logger.Printf("admin user seeded: %s", adminEmail)
+	}
 }
 
 func (m *AdminManager) AutoDetectDomain(r *http.Request) string {
-	if m.autoDetectDomain != "" {
-		return m.autoDetectDomain
+	// Fast path — read under RLock. If unset, upgrade to Lock to write.
+	m.mu.RLock()
+	cur := m.autoDetectDomain
+	m.mu.RUnlock()
+	if cur != "" {
+		return cur
 	}
-	if r != nil && r.Host != "" {
-		host := r.Host
-		if idx := strings.Index(host, ":"); idx > 0 {
-			host = host[:idx]
-		}
-		if host != "" && host != "localhost" && host != "127.0.0.1" && host != "0.0.0.0" {
-			m.autoDetectDomain = host
-			m.logger.Printf("auto-detected domain: %s", host)
-			return host
-		}
+	if r == nil || r.Host == "" {
+		return ""
 	}
-	return ""
+	host := r.Host
+	if idx := strings.Index(host, ":"); idx > 0 {
+		host = host[:idx]
+	}
+	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" {
+		return ""
+	}
+	m.mu.Lock()
+	// Recheck under write lock in case another goroutine wrote it first.
+	if m.autoDetectDomain == "" {
+		m.autoDetectDomain = host
+		m.logger.Printf("auto-detected domain: %s", host)
+	}
+	out := m.autoDetectDomain
+	m.mu.Unlock()
+	return out
+}
+
+// SystemSettingsInput mirrors SystemSettings but uses pointers for booleans
+// so a partial POST can leave them unchanged. Previously bool fields were
+// always overwritten with their zero value, so a client sending only
+// `{"maxUsers": 200}` silently disabled ThreatDetection, AutoPauseOnThreat
+// and RequireAIReview.
+type SystemSettingsInput struct {
+	GatewayAddr           string `json:"gatewayAddr"`
+	CDNHostname           string `json:"cdnHostname"`
+	EdgeHostname          string `json:"edgeHostname"`
+	APIHostname           string `json:"apiHostname"`
+	AutoDetectDomain      string `json:"autoDetectDomain"`
+	MaxUsers              int    `json:"maxUsers"`
+	DefaultStorageQuota   int64  `json:"defaultStorageQuota"`
+	ThreatDetection       *bool  `json:"threatDetection"`
+	AutoPauseOnThreat     *bool  `json:"autoPauseOnThreat"`
+	RequireAIReview       *bool  `json:"requireAiReview"`
+	MaxConcurrentSessions int    `json:"maxConcurrentSessions"`
+	SessionTimeoutMinutes int    `json:"sessionTimeoutMinutes"`
+}
+
+// UpdateSettings persists a subset of SystemSettings fields. Zero-valued
+// numeric fields, empty strings, and nil bool pointers are treated as
+// "leave unchanged" so a partial POST (e.g. { threatDetection: false })
+// only touches the fields the caller specified.
+func (m *AdminManager) UpdateSettings(in *SystemSettingsInput) {
+	if in == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if in.GatewayAddr != "" {
+		m.systemSettings.GatewayAddr = in.GatewayAddr
+	}
+	if in.CDNHostname != "" {
+		m.systemSettings.CDNHostname = in.CDNHostname
+	}
+	if in.EdgeHostname != "" {
+		m.systemSettings.EdgeHostname = in.EdgeHostname
+	}
+	if in.APIHostname != "" {
+		m.systemSettings.APIHostname = in.APIHostname
+	}
+	if in.AutoDetectDomain != "" {
+		m.autoDetectDomain = in.AutoDetectDomain
+	}
+	if in.MaxUsers > 0 {
+		m.systemSettings.MaxUsers = in.MaxUsers
+	}
+	if in.DefaultStorageQuota > 0 {
+		m.systemSettings.DefaultStorageQuota = in.DefaultStorageQuota
+	}
+	if in.MaxConcurrentSessions > 0 {
+		m.systemSettings.MaxConcurrentSessions = in.MaxConcurrentSessions
+	}
+	if in.SessionTimeoutMinutes > 0 {
+		m.systemSettings.SessionTimeoutMinutes = in.SessionTimeoutMinutes
+	}
+	if in.ThreatDetection != nil {
+		m.systemSettings.ThreatDetection = *in.ThreatDetection
+	}
+	if in.AutoPauseOnThreat != nil {
+		m.systemSettings.AutoPauseOnThreat = *in.AutoPauseOnThreat
+	}
+	if in.RequireAIReview != nil {
+		m.systemSettings.RequireAIReview = *in.RequireAIReview
+	}
 }
 
 func (m *AdminManager) GetSettings() *SystemSettings {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return &SystemSettings{
-		AutoDetectDomain:      m.autoDetectDomain,
-		MaxUsers:              1000,
-		DefaultStorageQuota:   10 * 1024 * 1024 * 1024,
-		ThreatDetection:       true,
-		AutoPauseOnThreat:     true,
-		RequireAIReview:       true,
-		MaxConcurrentSessions: 100,
-		SessionTimeoutMinutes: 60,
-	}
+	out := m.systemSettings
+	out.AutoDetectDomain = m.autoDetectDomain
+	return &out
 }
 
 type AdminHandler struct {
@@ -161,7 +284,11 @@ func NewAdminHandler(manager *AdminManager, auth *auth.AuthManager, detector *se
 func (h *AdminHandler) RequireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r)
-		if user == nil || user.Email != AdminEmail {
+		// Gate by role, not email. Two callers with role="admin" pass; the
+		// literal-email check locked the panel to a single seeded account and
+		// would grant privileges to anyone who registered with email="admin"
+		// before seeding ran (or with a case-variation).
+		if user == nil || auth.RoleLevelOf(user.Role) < auth.RoleAdmin {
 			http.Error(w, `{"error":"admin access required"}`, http.StatusForbidden)
 			return
 		}
@@ -225,7 +352,7 @@ func (h *AdminHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.auth.DeleteUser(userID); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		http.Error(w, `{"error":"could not delete user"}`, http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -248,6 +375,10 @@ func (h *AdminHandler) ReviewThreat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := auth.UserFromContext(r)
+	if user == nil {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
 	h.detector.ReviewThreat(req.ThreatID, user.ID, req.Resolved, req.Action)
 
 	threat := h.detector.GetThreat(req.ThreatID)
@@ -284,12 +415,13 @@ func (h *AdminHandler) Settings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
-		var settings SystemSettings
+		var settings SystemSettingsInput
 		if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
 			http.Error(w, `{"error":"invalid settings"}`, http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+		h.manager.UpdateSettings(&settings)
+		writeJSON(w, http.StatusOK, h.manager.GetSettings())
 		return
 	}
 	http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)

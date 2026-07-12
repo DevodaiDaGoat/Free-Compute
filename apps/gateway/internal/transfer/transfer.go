@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	cryptorand "crypto/rand"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -35,6 +36,11 @@ type FileTransfer struct {
 	CompletedAt  *time.Time
 	Error        string
 	Metadata     map[string]string
+	// limiterReleased guards against over-release when Complete → Cancel or
+	// Complete → Fail is called on an already-terminal transfer. Every drain
+	// of the shared limiter must be matched to exactly one CreateTransfer
+	// slot acquisition, otherwise the pool leaks in either direction.
+	limiterReleased bool
 	Mutex        sync.RWMutex
 }
 
@@ -107,15 +113,29 @@ func NewTransferManager(logger *log.Logger) *TransferManager {
 }
 
 func (m *TransferManager) CreateTransfer(sessionID string, direction TransferDirection, filename string, size int64, contentType string) (*FileTransfer, error) {
+	// Validate BEFORE acquiring the limiter token — otherwise an oversize
+	// request permanently leaks a concurrency slot on the "size too large"
+	// error path.
+	if size > maxFileSize {
+		return nil, errors.New("file size exceeds maximum allowed")
+	}
+	if size < 0 {
+		return nil, errors.New("file size must be non-negative")
+	}
+	// Zero-size transfers previously acquired a limiter slot but never released
+	// it (UpdateProgress / ProcessChunk both guard on `Size > 0` when
+	// auto-completing). After maxConcurrentTransfers such requests the pool
+	// was permanently exhausted. Reject them outright — empty-file semantics
+	// belong at the storage layer.
+	if size == 0 {
+		return nil, errors.New("file size must be greater than zero; use storage.Upload for empty files")
+	}
+
 	// Acquire limiter
 	select {
 	case m.limiter <- struct{}{}:
 	default:
 		return nil, errors.New("maximum concurrent transfers reached")
-	}
-
-	if size > maxFileSize {
-		return nil, errors.New("file size exceeds maximum allowed")
 	}
 
 	transfer := &FileTransfer{
@@ -184,22 +204,32 @@ func (m *TransferManager) UpdateProgress(transferID string, bytesTransferred int
 
 	transfer.BytesTransferred = bytesTransferred
 
-	// Check if complete
-	if transfer.BytesTransferred >= transfer.Size {
+	// Check if complete. Guard on state==Active so a caller sending progress
+	// past the declared size doesn't drain the limiter twice. Size==0 is
+	// rejected up front in CreateTransfer, so this branch only fires when the
+	// full declared body has arrived.
+	if transfer.State == TransferStateActive && transfer.Size > 0 && transfer.BytesTransferred >= transfer.Size {
 		now := time.Now()
 		transfer.State = TransferStateCompleted
 		transfer.CompletedAt = &now
-		
-		// Release limiter
-		select {
-		case <-m.limiter:
-		default:
-		}
-
+		m.releaseLimiterLocked(transfer)
 		m.logger.Printf("completed transfer %s (bytes=%d)", transferID, bytesTransferred)
 	}
 
 	return nil
+}
+
+// releaseLimiterLocked drains one slot from the shared limiter iff the
+// transfer has not already released. Must be called with transfer.Mutex held.
+func (m *TransferManager) releaseLimiterLocked(transfer *FileTransfer) {
+	if transfer.limiterReleased {
+		return
+	}
+	transfer.limiterReleased = true
+	select {
+	case <-m.limiter:
+	default:
+	}
 }
 
 func (m *TransferManager) FailTransfer(transferID string, errorMsg string) error {
@@ -213,12 +243,7 @@ func (m *TransferManager) FailTransfer(transferID string, errorMsg string) error
 
 	transfer.State = TransferStateFailed
 	transfer.Error = errorMsg
-	
-	// Release limiter
-	select {
-	case <-m.limiter:
-	default:
-	}
+	m.releaseLimiterLocked(transfer)
 
 	m.logger.Printf("failed transfer %s: %s", transferID, errorMsg)
 
@@ -235,12 +260,7 @@ func (m *TransferManager) CancelTransfer(transferID string) error {
 	defer transfer.Mutex.Unlock()
 
 	transfer.State = TransferStateCancelled
-	
-	// Release limiter
-	select {
-	case <-m.limiter:
-	default:
-	}
+	m.releaseLimiterLocked(transfer)
 
 	m.logger.Printf("cancelled transfer %s", transferID)
 
@@ -270,11 +290,30 @@ func (m *TransferManager) ProcessChunk(chunk *ChunkRequest) (*ChunkResponse, err
 		}, nil
 	}
 
-	// Update progress
-	transfer.BytesTransferred += int64(len(chunk.Data))
+	// Cap chunk-accumulated total at Size so a misbehaving client can't grow
+	// BytesTransferred without bound. Reject the individual chunk if the
+	// running total would exceed the declared size.
+	newTotal := transfer.BytesTransferred + int64(len(chunk.Data))
+	if transfer.Size > 0 && newTotal > transfer.Size {
+		return &ChunkResponse{
+			TransferID: chunk.TransferID,
+			ChunkIndex: chunk.ChunkIndex,
+			Success:    false,
+			Error:      "chunk exceeds declared transfer size",
+		}, nil
+	}
+	transfer.BytesTransferred = newTotal
 
-	// In a real implementation, this would write to storage or send to client
-	// For now, we just acknowledge receipt
+	// Auto-complete on final chunk and release the concurrency slot the
+	// creator acquired. UpdateProgress had this branch; ProcessChunk did not,
+	// so chunk-based uploads permanently leaked one slot per transfer and
+	// after maxConcurrentTransfers uploads every new one failed.
+	if transfer.Size > 0 && transfer.BytesTransferred >= transfer.Size && transfer.State == TransferStateActive {
+		transfer.State = TransferStateCompleted
+		now := time.Now()
+		transfer.CompletedAt = &now
+		m.releaseLimiterLocked(transfer)
+	}
 
 	return &ChunkResponse{
 		TransferID: chunk.TransferID,
@@ -434,9 +473,23 @@ func generateTransferID() string {
 
 func generateRandomString(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	// Previously seeded every character from time.Now().UnixNano(), which is
+	// invariant within a single call — so every byte was identical and two
+	// transfers created in the same nanosecond produced identical IDs (map
+	// key collision, silent overwrite of prior transfer state). crypto/rand
+	// gives independent bytes and doesn't collide.
 	b := make([]byte, length)
+	if _, err := cryptorand.Read(b); err != nil {
+		// Fall back to time-derived jitter with per-byte offset so at least
+		// each byte differs. Should be effectively unreachable.
+		nano := time.Now().UnixNano()
+		for i := range b {
+			b[i] = charset[(nano+int64(i)*17)&0x7fffffffffffffff%int64(len(charset))]
+		}
+		return string(b)
+	}
 	for i := range b {
-		b[i] = charset[time.Now().UnixNano()%int64(len(charset))]
+		b[i] = charset[int(b[i])%len(charset)]
 	}
 	return string(b)
 }

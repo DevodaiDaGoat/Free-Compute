@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -41,6 +42,8 @@ type Server struct {
 	turnServer      string
 	stunServer      string
 	networkMonitor  *NetworkMonitor
+	shutdownCh      chan struct{}
+	shutdownOnce    sync.Once
 }
 
 type CodecSupport struct {
@@ -88,16 +91,20 @@ const (
 )
 
 type SessionStats struct {
-	BytesReceived    uint64
-	BytesSent        uint64
-	PacketsReceived  uint64
-	PacketsSent      uint64
-	PacketsLost      uint32
-	CurrentBitrate   uint32
-	CurrentFPS       uint32
-	RTT              uint32
-	Jitter           uint32
-	LastSampledAt    time.Time
+	BytesReceived      uint64
+	BytesSent          uint64
+	PacketsReceived    uint64
+	PacketsSent        uint64
+	PacketsLost        uint32
+	CurrentBitrate     uint32 // Mbps, computed from delta between samples
+	CurrentFPS         uint32
+	RTT                uint32
+	Jitter             uint32
+	LastSampledAt      time.Time
+	// lastBytesReceived tracks the BytesReceived value at the previous sample so
+	// CurrentBitrate reflects the instantaneous rate rather than the session-long
+	// average that decays over time.
+	lastBytesReceived  uint64
 }
 
 type NetworkMonitor struct {
@@ -177,7 +184,42 @@ func NewServer(logger *log.Logger, codecSupport CodecSupport, turnServer, stunSe
 			EnableCompression:  true,
 			CheckOrigin:        allowAll,
 		},
+		shutdownCh: make(chan struct{}),
 	}, nil
+}
+
+// Shutdown signals the server to release delayed-deletion timers and stop
+// scheduling new session cleanup work. Safe to call multiple times.
+func (s *Server) Shutdown() {
+	s.shutdownOnce.Do(func() {
+		if s.shutdownCh != nil {
+			close(s.shutdownCh)
+		}
+	})
+}
+
+// safeConn serializes all writes to a websocket.Conn. Gorilla's docs require
+// callers to guarantee only one goroutine calls a write method at a time.
+// Every write also sets a fresh SetWriteDeadline so a stalled peer cannot
+// block a write goroutine indefinitely (which would leak the goroutine + its
+// per-session state on every dead client).
+type safeConn struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (c *safeConn) WriteJSON(v interface{}) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(defaultWriteTimeout))
+	return c.conn.WriteJSON(v)
+}
+
+func (c *safeConn) WriteMessage(mt int, data []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(defaultWriteTimeout))
+	return c.conn.WriteMessage(mt, data)
 }
 
 func (s *Server) HandleSignal(w http.ResponseWriter, r *http.Request) {
@@ -187,17 +229,19 @@ func (s *Server) HandleSignal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := s.upgrader.Upgrade(w, r, nil)
+	rawConn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		s.logger.Printf("websocket upgrade failed for session %s: %v", sessionID, err)
 		return
 	}
-	defer conn.Close()
+	defer rawConn.Close()
 
-	conn.SetReadLimit(maxMessageSize)
-	conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
-	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
+	conn := &safeConn{conn: rawConn}
+
+	rawConn.SetReadLimit(maxMessageSize)
+	rawConn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
+	rawConn.SetPongHandler(func(string) error {
+		rawConn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
 		return nil
 	})
 
@@ -207,7 +251,7 @@ func (s *Server) HandleSignal(w http.ResponseWriter, r *http.Request) {
 
 	if !exists {
 		s.logger.Printf("session %s not found", sessionID)
-		conn.WriteJSON(map[string]string{"error": "session not found"})
+		_ = conn.WriteJSON(map[string]string{"error": "session not found"})
 		return
 	}
 
@@ -220,20 +264,48 @@ func (s *Server) HandleSignal(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer close(done)
 		for {
-			if err := conn.SetReadDeadline(time.Now().Add(defaultReadTimeout)); err != nil {
+			if err := rawConn.SetReadDeadline(time.Now().Add(defaultReadTimeout)); err != nil {
 				s.logger.Printf("signaling read deadline set error for session %s: %v", sessionID, err)
 				return
 			}
-			var msg SignalMessage
-			if err := conn.ReadJSON(&msg); err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+			// Use ReadMessage (not ReadJSON) so we can tolerate two client
+			// dialects on the same signaling endpoint: the RTCPeerConnection
+			// clients under /connect/page.tsx send text JSON (offer/answer/ice),
+			// while the RemoteDesktop app's useTunnelConnection sends framed
+			// binary heartbeats. ReadJSON treated the framed binary as a fatal
+			// decode error and returned, which produced an infinite 5s
+			// reconnect loop on every RemoteDesktop session.
+			mt, data, err := rawConn.ReadMessage()
+			if err != nil {
+				// 1000 (Normal), 1001 (Going Away), 1005 (No Status), and
+				// 1006 (Abnormal) all describe expected browser-side close
+				// paths (tab closed, navigation, viewer unmounted). Only
+				// truly unexpected close codes are worth logging.
+				if websocket.IsUnexpectedCloseError(err,
+					websocket.CloseNormalClosure,
+					websocket.CloseGoingAway,
+					websocket.CloseNoStatusReceived,
+					websocket.CloseAbnormalClosure,
+				) {
 					s.logger.Printf("signaling read error for session %s: %v", sessionID, err)
 				}
 				return
 			}
+			if mt != websocket.TextMessage {
+				// Binary frame: framed tunnel heartbeat from useTunnelConnection.
+				// Ignore silently — the tunnel protocol has no server-side
+				// obligations here; the connection stays open.
+				continue
+			}
+			var msg SignalMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				// Malformed JSON on a text frame — skip rather than disconnect;
+				// the peer may recover on the next well-formed message.
+				continue
+			}
 			if err := s.handleSignalMessage(sessionID, &msg, conn); err != nil {
 				s.logger.Printf("signaling message error for session %s: %v", sessionID, err)
-				conn.WriteJSON(map[string]string{"error": err.Error()})
+				_ = conn.WriteJSON(map[string]string{"error": err.Error()})
 				return
 			}
 		}
@@ -535,7 +607,12 @@ func (s *Server) codecMimeType(codec string) string {
 }
 
 func (s *Server) startStatsCollector(session *Session) {
+	// Start the bandwidth estimator (GCC-style adaptive bitrate + codec switch).
+	bwe := NewBandwidthEstimator(session, s.logger)
+	bwe.Start()
+
 	go func() {
+		defer bwe.Stop()
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -547,30 +624,69 @@ func (s *Server) startStatsCollector(session *Session) {
 					return
 				}
 				stats := session.PeerConnection.GetStats()
-				session.Mutex.Lock()
+				// BytesSent / PacketsSent are also mutated via atomic.AddUint64
+				// from WriteVideoRTP / WriteAudioRTP (and via lock-protected
+				// increments from HandleMediaIngest). Use atomics here too so
+				// all writers agree on a single access mode.
+				var bytesReceived, packetsReceived uint64
+				var packetsLost, jitter, rtt uint32
+				var haveInbound bool
+				var bytesSent, packetsSentPion uint64
+				var haveOutbound bool
 				for _, stat := range stats {
 					switch v := stat.(type) {
 					case webrtc.InboundRTPStreamStats:
-						session.Stats.BytesReceived = v.BytesReceived
-						session.Stats.PacketsLost = uint32(v.PacketsLost)
-						session.Stats.Jitter = uint32(v.Jitter * 1000)
-						session.Stats.PacketsReceived = uint64(v.PacketsReceived)
+						bytesReceived = v.BytesReceived
+						packetsLost = uint32(v.PacketsLost)
+						jitter = uint32(v.Jitter * 1000)
+						packetsReceived = uint64(v.PacketsReceived)
+						haveInbound = true
 					case webrtc.OutboundRTPStreamStats:
-						session.Stats.BytesSent = v.BytesSent
-						session.Stats.PacketsSent = uint64(v.PacketsSent)
+						bytesSent = v.BytesSent
+						packetsSentPion = uint64(v.PacketsSent)
+						haveOutbound = true
 					case *webrtc.ICECandidatePairStats:
 						if v.CurrentRoundTripTime > 0 {
-							session.Stats.RTT = uint32(v.CurrentRoundTripTime * 1000)
+							rtt = uint32(v.CurrentRoundTripTime * 1000)
 						}
 					}
 				}
+				session.Mutex.Lock()
+				if haveInbound {
+					atomic.StoreUint64(&session.Stats.BytesReceived, bytesReceived)
+					atomic.StoreUint64(&session.Stats.PacketsReceived, packetsReceived)
+					session.Stats.PacketsLost = packetsLost
+					session.Stats.Jitter = jitter
+				}
+				if haveOutbound {
+					// Only overwrite from pion's numbers if the atomic write path
+					// hasn't recorded anything for this session — otherwise we
+					// clobber counts from WriteVideoRTP/HandleMediaIngest.
+					if atomic.LoadUint64(&session.Stats.BytesSent) == 0 {
+						atomic.StoreUint64(&session.Stats.BytesSent, bytesSent)
+					}
+					if atomic.LoadUint64(&session.Stats.PacketsSent) == 0 {
+						atomic.StoreUint64(&session.Stats.PacketsSent, packetsSentPion)
+					}
+				}
+				if rtt > 0 {
+					session.Stats.RTT = rtt
+				}
+				// Compute bitrate from the DELTA of bytes since the last sample,
+				// not from cumulative BytesReceived. The cumulative form divides
+				// total bytes by session elapsed time — a smoothed average that
+				// looks like "the bitrate is declining" even at steady state.
+				br := atomic.LoadUint64(&session.Stats.BytesReceived)
 				if session.Stats.LastSampledAt.IsZero() {
 					session.Stats.CurrentBitrate = 0
+					session.Stats.lastBytesReceived = br
 				} else {
 					elapsed := time.Since(session.Stats.LastSampledAt).Seconds()
-					if elapsed > 0 {
-						session.Stats.CurrentBitrate = uint32(float64(session.Stats.BytesReceived*8) / elapsed / 1_000_000)
+					if elapsed > 0 && br >= session.Stats.lastBytesReceived {
+						deltaBytes := br - session.Stats.lastBytesReceived
+						session.Stats.CurrentBitrate = uint32(float64(deltaBytes*8) / elapsed / 1_000_000)
 					}
+					session.Stats.lastBytesReceived = br
 				}
 				session.Stats.LastSampledAt = time.Now()
 				session.Mutex.Unlock()
@@ -578,6 +694,7 @@ func (s *Server) startStatsCollector(session *Session) {
 		}
 	}()
 }
+
 
 func (s *Server) GetSession(sessionID string) (*Session, error) {
 	s.sessionsMutex.RLock()
@@ -628,10 +745,16 @@ func (s *Server) EndSession(sessionID string, reason string) error {
 	if session.stopCh != nil {
 		close(session.stopCh)
 	}
-	if session.PeerConnection != nil {
-		session.PeerConnection.Close()
-	}
+	pc := session.PeerConnection
 	session.Mutex.Unlock()
+
+	// Close the PeerConnection OUTSIDE session.Mutex: pion synchronously fires
+	// OnICEConnectionStateChange(Closed) from Close(), which re-enters
+	// EndSession → session.Mutex.Lock() → deadlock. State is already Ended so
+	// the recursive call short-circuits at the state check above.
+	if pc != nil {
+		_ = pc.Close()
+	}
 
 	select {
 	case <-s.sessionLimiter:
@@ -640,12 +763,25 @@ func (s *Server) EndSession(sessionID string, reason string) error {
 
 	s.logger.Printf("ended session %s (reason: %s)", sessionID, reason)
 
-	go func() {
-		time.Sleep(5 * time.Minute)
+	// Schedule delayed deletion so clients can still fetch final stats.
+	// Use time.AfterFunc so the timer can be short-circuited on shutdown
+	// (via s.shutdownCh) instead of leaking a sleeping goroutine per session.
+	timer := time.AfterFunc(5*time.Minute, func() {
 		s.sessionsMutex.Lock()
 		delete(s.sessions, sessionID)
 		s.sessionsMutex.Unlock()
-	}()
+	})
+	// Stop the timer if the server is shutting down before it fires.
+	if s.shutdownCh != nil {
+		go func() {
+			select {
+			case <-s.shutdownCh:
+				timer.Stop()
+			case <-time.After(5*time.Minute + time.Second):
+				// timer either fired or was stopped; no cleanup needed
+			}
+		}()
+	}
 
 	return nil
 }
@@ -678,7 +814,7 @@ func (s *Server) GetNetworkQuality(sessionID string) (*NetworkQualitySnapshot, e
 	return quality, nil
 }
 
-func (s *Server) handleSignalMessage(sessionID string, msg *SignalMessage, wsConn *websocket.Conn) error {
+func (s *Server) handleSignalMessage(sessionID string, msg *SignalMessage, wsConn *safeConn) error {
 	s.sessionsMutex.RLock()
 	session, exists := s.sessions[sessionID]
 	s.sessionsMutex.RUnlock()
@@ -765,17 +901,21 @@ func (s *Server) WriteVideoRTP(sessionID string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	session.Mutex.Lock()
-	defer session.Mutex.Unlock()
-	if session.VideoTrack == nil {
+	session.Mutex.RLock()
+	track := session.VideoTrack
+	session.Mutex.RUnlock()
+	if track == nil {
 		return errors.New("video track not available")
 	}
-	n, err := session.VideoTrack.Write(data)
+	n, err := track.Write(data)
 	if err != nil {
 		return err
 	}
-	session.Stats.PacketsSent++
-	session.Stats.BytesSent += uint64(n)
+	// All writers to PacketsSent / BytesSent use atomics; the stats collector
+	// reads via atomic.LoadUint64 and writes deltas via atomic.StoreUint64.
+	// See HandleMediaIngest + startStatsCollector for the matching paths.
+	atomic.AddUint64(&session.Stats.PacketsSent, 1)
+	atomic.AddUint64(&session.Stats.BytesSent, uint64(n))
 	return nil
 }
 
@@ -784,17 +924,18 @@ func (s *Server) WriteAudioRTP(sessionID string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	session.Mutex.Lock()
-	defer session.Mutex.Unlock()
-	if session.AudioTrack == nil {
+	session.Mutex.RLock()
+	track := session.AudioTrack
+	session.Mutex.RUnlock()
+	if track == nil {
 		return errors.New("audio track not available")
 	}
-	n, err := session.AudioTrack.Write(data)
+	n, err := track.Write(data)
 	if err != nil {
 		return err
 	}
-	session.Stats.PacketsSent++
-	session.Stats.BytesSent += uint64(n)
+	atomic.AddUint64(&session.Stats.PacketsSent, 1)
+	atomic.AddUint64(&session.Stats.BytesSent, uint64(n))
 	return nil
 }
 
@@ -1055,7 +1196,9 @@ func (s *Server) HandleMediaIngest(w http.ResponseWriter, r *http.Request) {
 
 			rtpBuf := getRTPBuf()
 			if len(*rtpBuf) < pktLen {
-				// Larger than pool buffer; allocate exact
+				// Larger than pool buffer; allocate exact. Return the pool buffer
+				// immediately so it's reused instead of leaked on every jumbo packet.
+				putRTPBuf(rtpBuf)
 				exact := make([]byte, pktLen)
 				_, copyErr := io.ReadFull(r.Body, exact)
 				if copyErr != nil {
@@ -1069,10 +1212,11 @@ func (s *Server) HandleMediaIngest(w http.ResponseWriter, r *http.Request) {
 					s.logger.Printf("session %s video write error: %v", sessionID, writeErr)
 					return
 				}
-				session.Mutex.Lock()
-				session.Stats.PacketsSent++
-				session.Stats.BytesSent += uint64(pktLen)
-				session.Mutex.Unlock()
+				// PacketsSent / BytesSent use atomics — WriteVideoRTP + stats
+				// collector agree on this access mode. Holding session.Mutex
+				// per packet here would also block AllocateHost readers.
+				atomic.AddUint64(&session.Stats.PacketsSent, 1)
+				atomic.AddUint64(&session.Stats.BytesSent, uint64(pktLen))
 			} else {
 				buf := *rtpBuf
 				_, copyErr := io.ReadFull(r.Body, buf[:pktLen])
@@ -1090,10 +1234,8 @@ func (s *Server) HandleMediaIngest(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				putRTPBuf(rtpBuf)
-				session.Mutex.Lock()
-				session.Stats.PacketsSent++
-				session.Stats.BytesSent += uint64(pktLen)
-				session.Mutex.Unlock()
+				atomic.AddUint64(&session.Stats.PacketsSent, 1)
+				atomic.AddUint64(&session.Stats.BytesSent, uint64(pktLen))
 			}
 		}
 		session.Mutex.RLock()
@@ -1125,10 +1267,8 @@ func (s *Server) HandleMediaIngest(w http.ResponseWriter, r *http.Request) {
 					s.logger.Printf("session %s audio write error: %v", sessionID, writeErr)
 					return
 				}
-				session.Mutex.Lock()
-				session.Stats.PacketsSent++
-				session.Stats.BytesSent += uint64(n)
-				session.Mutex.Unlock()
+				atomic.AddUint64(&session.Stats.PacketsSent, 1)
+				atomic.AddUint64(&session.Stats.BytesSent, uint64(n))
 			}
 			if readErr != nil {
 				if errors.Is(readErr, io.EOF) {
@@ -1163,12 +1303,16 @@ func (s *Server) HandleDataIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bound the body: an unbounded io.ReadAll on r.Body lets a hostile caller
+	// send an arbitrarily large upload and OOM the gateway. maxMessageSize is
+	// the same cap the websocket signal path uses (64 KiB) — DataChannel is
+	// meant for small control messages, not bulk transfer.
+	r.Body = http.MaxBytesReader(w, r.Body, maxMessageSize)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
 
 	session.Mutex.RLock()
 	dc := session.DataChannel

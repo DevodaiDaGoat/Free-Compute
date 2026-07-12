@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -135,12 +136,27 @@ func signalRouteAndRoom(path string) (string, string) {
 	return parts[0], parts[2]
 }
 
+// pendingRoomCh is a sentinel channel returned to pollers when the target room
+// does not exist yet (or was swept). It is intentionally never closed so the
+// poll loop just waits for its deadline instead of spinning against a
+// pre-closed channel and burning CPU inside a lock/unlock loop.
+var pendingRoomCh = make(chan struct{})
+
 func (s *signalStore) messagesAfter(roomKey string, after int64) ([]SignalMessage, <-chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := time.Now().UTC()
-	room := s.getOrCreateLocked(roomKey, now)
+	// Do NOT auto-create rooms on read. If sweep just deleted the room and
+	// this GET recreated it, sweep+poll would resurrect swept rooms forever.
+	// Only append() (write) creates rooms.
+	room := s.rooms[roomKey]
+	if room == nil {
+		// Returning a closed channel here would make the caller's select fire
+		// immediately and busy-loop back to messagesAfter — a CPU-burning
+		// spin against the store mutex. Return the never-closing sentinel so
+		// the poller waits for its long-poll deadline instead.
+		return nil, pendingRoomCh
+	}
 	messages := make([]SignalMessage, 0)
 	for _, message := range room.messages {
 		if message.Seq > after {
@@ -180,12 +196,19 @@ func (s *signalStore) getOrCreateLocked(roomKey string, now time.Time) *signalRo
 	return room
 }
 
-func (s *signalStore) sweepLoop() {
+// sweepLoop periodically removes expired signaling rooms. It runs for the
+// lifetime of the server context and exits cleanly when ctx is cancelled.
+func (s *signalStore) sweepLoop(ctx context.Context) {
 	ticker := time.NewTicker(signalCleanupInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		s.sweep()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.sweep()
+		}
 	}
 }
 

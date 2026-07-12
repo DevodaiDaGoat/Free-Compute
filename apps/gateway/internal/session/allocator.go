@@ -188,20 +188,17 @@ func (a *HostAllocator) UpdateHostLoad(hostID string, load HostLoad) error {
 		return errors.New("host not found")
 	}
 
+	// Acquire per-host lock before mutating host fields — AllocateHost reads
+	// host.CurrentLoad under host.Mutex.RLock, so writers must also take it.
+	host.Mutex.Lock()
 	wasOnline := host.Online
 	host.CurrentLoad = load
 	host.LastHeartbeat = time.Now()
+	host.Online = true
+	host.Mutex.Unlock()
 
-	if load.CPUUsagePercent > 0 || load.RAMUsagePercent > 0 || load.ActiveVMs > 0 {
-		host.Online = true
-	} else {
-		host.Online = false
-	}
-
-	if host.Online && !wasOnline {
+	if !wasOnline {
 		a.byOnline[host.ID] = host
-	} else if !host.Online && wasOnline {
-		delete(a.byOnline, host.ID)
 	}
 
 	a.hostsMutex.Unlock()
@@ -225,23 +222,37 @@ func (a *HostAllocator) AllocateHost(ctx context.Context, sessionType SessionTyp
 
 	candidates := make([]*Host, 0)
 	for _, host := range regionHosts {
+		// host.Online, host.LastHeartbeat, host.GPUs, and host.CurrentLoad are
+		// all mutated by UpdateHostLoad under host.Mutex. Take the read lock for
+		// the WHOLE candidate check to avoid racing with a heartbeat update.
+		host.Mutex.RLock()
+		online := host.Online
+		lastBeat := host.LastHeartbeat
+		gpus := host.GPUs
+		hasCap := a.hasCapacity(host, sessionType)
+		host.Mutex.RUnlock()
+
+		if !online {
+			continue
+		}
+
 		if classHosts != nil {
 			if _, ok := classHosts[host.ID]; !ok {
 				continue
 			}
 		}
 
-		host.Mutex.RLock()
-		if gpuRequired && len(host.GPUs) == 0 {
-			host.Mutex.RUnlock()
+		if time.Since(lastBeat) > 5*time.Minute {
 			continue
 		}
-		if !a.hasCapacity(host, sessionType) {
-			host.Mutex.RUnlock()
+
+		if gpuRequired && len(gpus) == 0 {
+			continue
+		}
+		if !hasCap {
 			continue
 		}
 		candidates = append(candidates, host)
-		host.Mutex.RUnlock()
 	}
 
 	if len(candidates) == 0 {
@@ -311,8 +322,17 @@ func (a *HostAllocator) selectBestHost(candidates []*Host, sessionType SessionTy
 }
 
 func (a *HostAllocator) scoreHost(host *Host, sessionType SessionType, resourceClass ResourceClass, gpuRequired bool) float64 {
-	score := 0.0
+	// host.CurrentLoad, host.GPUs, and host.Network are mutated by UpdateHostLoad
+	// under host.Mutex. Snapshot the values we need under RLock so the loop below
+	// runs on a consistent view.
+	host.Mutex.RLock()
 	load := host.CurrentLoad
+	gpuCount := len(host.GPUs)
+	latency := host.Network.P95LatencyMs
+	classes := host.ResourceClasses
+	host.Mutex.RUnlock()
+
+	score := 0.0
 
 	// Score based on available resources (inverse of load)
 	score += (100 - load.CPUUsagePercent) * 0.3
@@ -320,19 +340,19 @@ func (a *HostAllocator) scoreHost(host *Host, sessionType SessionType, resourceC
 
 	// GPU score for gaming or GPU-required sessions
 	if sessionType == SessionTypeGaming || gpuRequired {
-		if len(host.GPUs) > 0 {
+		if gpuCount > 0 {
 			score += (100 - load.GPUUsagePercent) * 0.3
 			score += (100 - load.EncoderUsagePercent) * 0.2
 		}
 	}
 
 	// Network quality score
-	if host.Network.P95LatencyMs > 0 {
-		score += (100 - host.Network.P95LatencyMs) * 0.1
+	if latency > 0 {
+		score += (100 - latency) * 0.1
 	}
 
 	// Resource class match bonus
-	for _, rc := range host.ResourceClasses {
+	for _, rc := range classes {
 		if rc == resourceClass {
 			score += 10
 			break

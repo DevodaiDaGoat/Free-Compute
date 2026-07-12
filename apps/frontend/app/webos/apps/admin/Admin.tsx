@@ -3,6 +3,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../boot/BootSequence';
 
+// Swallow expected auth failures (403/401) without noise; log unexpected errors.
+function logUnlessForbidden(e: unknown) {
+  const msg = String((e as Error)?.message || e || '');
+  if (msg.includes('forbidden') || msg.includes('unauthorized') || msg.includes('401') || msg.includes('403')) {
+    return;
+  }
+  console.error(e);
+}
+
 interface DashboardData {
   totalThreats: number;
   pausedVMs: number;
@@ -71,7 +80,7 @@ export default function AdminApp() {
     try {
       const d = await apiFetch('/admin/dashboard');
       setDashboard(d);
-    } catch (e) { console.error(e); }
+    } catch (e) { logUnlessForbidden(e); }
     setLoading(false);
   }, []);
 
@@ -79,28 +88,28 @@ export default function AdminApp() {
     try {
       const d = await apiFetch('/admin/users');
       setUsers(d.users || []);
-    } catch (e) { console.error(e); }
+    } catch (e) { logUnlessForbidden(e); }
   }, []);
 
   const fetchThreats = useCallback(async () => {
     try {
       const d = await apiFetch('/admin/threats');
       setThreats(d.threats || []);
-    } catch (e) { console.error(e); }
+    } catch (e) { logUnlessForbidden(e); }
   }, []);
 
   const fetchSettings = useCallback(async () => {
     try {
       const s = await apiFetch('/admin/settings');
       setSettings(s);
-    } catch (e) { console.error(e); }
+    } catch (e) { logUnlessForbidden(e); }
   }, []);
 
   const fetchDomain = useCallback(async () => {
     try {
       const d = await apiFetch('/admin/auto-detect');
       setDomain(d);
-    } catch (e) { console.error(e); }
+    } catch (e) { logUnlessForbidden(e); }
   }, []);
 
   useEffect(() => { fetchDashboard(); }, []);
@@ -112,14 +121,14 @@ export default function AdminApp() {
         body: JSON.stringify({ threatId, action, resolved }),
       });
       fetchThreats();
-    } catch (e) { console.error(e); }
+    } catch (e) { logUnlessForbidden(e); }
   }, [fetchThreats]);
 
   const handleDeleteUser = useCallback(async (userId: string) => {
     try {
       await apiFetch(`/admin/users/delete?userId=${userId}`, { method: 'DELETE' });
       fetchUsers();
-    } catch (e) { console.error(e); }
+    } catch (e) { logUnlessForbidden(e); }
   }, [fetchUsers]);
 
   const renderTab = () => {

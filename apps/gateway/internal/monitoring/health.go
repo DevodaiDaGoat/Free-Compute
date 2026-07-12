@@ -80,10 +80,14 @@ func (hc *HealthChecker) Report() *HealthReport {
 	defer hc.mu.RUnlock()
 
 	overall := HealthOK
+	// Snapshot each ComponentHealth into a fresh value so the JSON encoder
+	// (which runs after we release the RLock) can't race with a concurrent
+	// ReportHealth mutating the underlying struct.
 	components := make([]*ComponentHealth, 0, len(hc.components))
 
 	for _, comp := range hc.components {
-		components = append(components, comp)
+		snap := *comp
+		components = append(components, &snap)
 		if comp.Status == HealthDown {
 			overall = HealthDown
 		} else if comp.Status == HealthDegraded && overall != HealthDown {

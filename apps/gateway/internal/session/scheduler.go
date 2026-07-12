@@ -13,8 +13,8 @@ type SessionScheduler struct {
 	queue      priorityHeap
 	queueMutex sync.RWMutex
 	allocator  *HostAllocator
-	running    bool
 	stopChan   chan struct{}
+	stopOnce   sync.Once
 }
 
 type QueuedSession struct {
@@ -22,7 +22,12 @@ type QueuedSession struct {
 	Request   *CreateSessionRequest
 	QueuedAt  time.Time
 	Priority  int
-	index     int
+	// FailedAttempts tracks consecutive AllocateHost failures. Previously the
+	// scheduler only reduced priority (clamped at 0) on failure, so a job that
+	// could never be scheduled (no host with matching class/region) burned
+	// every tick popping and repushing itself and starved lower-priority jobs.
+	FailedAttempts int
+	index          int
 }
 
 type priorityHeap []*QueuedSession
@@ -72,13 +77,12 @@ func NewSessionScheduler(logger *log.Logger, allocator *HostAllocator) *SessionS
 }
 
 func (s *SessionScheduler) Start(config SchedulerConfig) {
-	s.running = true
 	go s.run(config)
 }
 
+// Stop signals the scheduler goroutine to exit. Safe to call multiple times.
 func (s *SessionScheduler) Stop() {
-	s.running = false
-	close(s.stopChan)
+	s.stopOnce.Do(func() { close(s.stopChan) })
 }
 
 func (s *SessionScheduler) Enqueue(sessionID string, request *CreateSessionRequest) {
@@ -150,7 +154,16 @@ func (s *SessionScheduler) processQueue(config SchedulerConfig) {
 	)
 
 	if err != nil {
-		s.logger.Printf("failed to allocate host for session %s: %v", queued.SessionID, err)
+		queued.FailedAttempts++
+		// Drop after 10 consecutive failures — otherwise a job that no host
+		// can satisfy (e.g. a resource class we don't support yet) spins the
+		// scheduler forever at priority 0 and blocks every other job.
+		const maxFailures = 10
+		if queued.FailedAttempts >= maxFailures {
+			s.logger.Printf("dropping session %s after %d failed allocation attempts: %v", queued.SessionID, queued.FailedAttempts, err)
+			return
+		}
+		s.logger.Printf("failed to allocate host for session %s (attempt %d/%d): %v", queued.SessionID, queued.FailedAttempts, maxFailures, err)
 		queued.Priority = max(queued.Priority-1, 0)
 		s.queueMutex.Lock()
 		heap.Push(&s.queue, queued)

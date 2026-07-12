@@ -3,10 +3,10 @@ package handler
 import (
 	"crypto/subtle"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -17,6 +17,7 @@ import (
 type Handler struct {
 	store     storage.Storage
 	authToken string
+	allowAnon bool
 	logger    *log.Logger
 }
 
@@ -24,12 +25,26 @@ func NewHandler(store storage.Storage, authToken string, logger *log.Logger) *Ha
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Handler{store: store, authToken: authToken, logger: logger}
+	// A misconfigured deployment (empty FREECOMPUTE_FILESERVICE_AUTH_TOKEN)
+	// previously silently disabled auth entirely — any client could upload,
+	// download, or delete on behalf of any userId. Now require an explicit
+	// opt-in env var for anon operation; otherwise a missing token fails
+	// closed at request time so the operator notices immediately.
+	allowAnon := os.Getenv("FREECOMPUTE_FILESERVICE_ALLOW_ANON") == "1"
+	if authToken == "" && allowAnon {
+		logger.Printf("WARNING: file-service running with anonymous access — FREECOMPUTE_FILESERVICE_ALLOW_ANON=1 is set")
+	} else if authToken == "" {
+		logger.Printf("WARNING: FREECOMPUTE_FILESERVICE_AUTH_TOKEN is empty — all requests will be rejected. Set the token, or set FREECOMPUTE_FILESERVICE_ALLOW_ANON=1 for local dev.")
+	}
+	return &Handler{store: store, authToken: authToken, allowAnon: allowAnon, logger: logger}
 }
 
 func (h *Handler) authenticate(r *http.Request) (string, bool) {
 	if h.authToken == "" {
-		return "anonymous", true
+		if h.allowAnon {
+			return "anonymous", true
+		}
+		return "", false
 	}
 	token := r.Header.Get("Authorization")
 	if strings.HasPrefix(token, "Bearer ") {
@@ -72,8 +87,15 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		mimeType = "application/octet-stream"
 	}
 
+	// Bound the upload at the storage layer's MaxUploadSize so a chunked or
+	// unbounded body can't fill the disk / OOM the process.
+	r.Body = http.MaxBytesReader(w, r.Body, storage.MaxUploadSize)
 	info, err := h.store.Upload(userID, filePath, mimeType, r.Body)
 	if err != nil {
+		if err == storage.ErrPathTraversal {
+			writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "invalid path", Code: 400})
+			return
+		}
 		h.logger.Printf("upload error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: err.Error(), Code: 500})
 		return
@@ -102,15 +124,65 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 
 	reader, info, err := h.store.Download(userID, filePath)
 	if err != nil {
+		if err == storage.ErrPathTraversal {
+			writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "invalid path", Code: 400})
+			return
+		}
 		writeJSON(w, http.StatusNotFound, models.ErrorResponse{Error: "file not found", Code: 404})
 		return
 	}
 	defer reader.Close()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, info.Name))
+	// Use RFC 5987 filename* form and strip control chars so a filename
+	// containing " or \n can't inject additional headers.
+	w.Header().Set("Content-Disposition", contentDispositionAttachment(info.Name))
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
-	io.Copy(w, reader)
+	if _, err := io.Copy(w, reader); err != nil {
+		h.logger.Printf("download copy error: %v", err)
+	}
+}
+
+// contentDispositionAttachment builds a safe attachment header. Any character
+// outside a conservative filename-safe set is stripped from the fallback quoted
+// filename and represented via RFC 5987 filename*= for full fidelity.
+func contentDispositionAttachment(name string) string {
+	// Fallback: strip characters that could break the header (quotes, CR/LF,
+	// backslashes) and truncate anything past a safe length.
+	safe := make([]byte, 0, len(name))
+	for i := 0; i < len(name) && i < 200; i++ {
+		c := name[i]
+		if c < 0x20 || c == 0x7f || c == '"' || c == '\\' {
+			continue
+		}
+		safe = append(safe, c)
+	}
+	fallback := string(safe)
+	if fallback == "" {
+		fallback = "download"
+	}
+	// URL-encode the original name for filename*=. We hand-roll a small subset
+	// of percent-encoding since we already imported io/strconv only.
+	encoded := rfc5987Encode(name)
+	return `attachment; filename="` + fallback + `"; filename*=UTF-8''` + encoded
+}
+
+func rfc5987Encode(s string) string {
+	const hex = "0123456789ABCDEF"
+	safe := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~"
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if strings.IndexByte(safe, c) >= 0 {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&0x0f])
+	}
+	return b.String()
 }
 
 func (h *Handler) FileOps(w http.ResponseWriter, r *http.Request) {

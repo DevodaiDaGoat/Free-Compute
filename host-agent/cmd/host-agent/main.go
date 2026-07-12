@@ -179,12 +179,35 @@ func (r RouteConfig) poolSize() int {
 
 func runTunnelLoop(ctx context.Context, cfg Config, route RouteConfig, slot int, logger *log.Logger, vm *VMManager) {
 	baseDelay := cfg.ReconnectDelay
-	maxDelay := 30 * time.Second
+	maxDelay := 60 * time.Second
 	attempt := 0
+	consecutiveFails := 0
+	lastLoggedFail := time.Time{}
+	const suppressAfter = 3 // log freely for first 3 failures, then throttle
 
 	for {
-		if err := runTunnelOnce(ctx, cfg, route, logger, vm); err != nil && ctx.Err() == nil {
-			logger.Printf("route=%s slot=%d disconnected: %v", route.ID, slot, err)
+		err := runTunnelOnce(ctx, cfg, route, logger, vm)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			consecutiveFails++
+			shouldLog := consecutiveFails <= suppressAfter ||
+				time.Since(lastLoggedFail) >= 60*time.Second
+			if shouldLog {
+				if consecutiveFails == suppressAfter+1 {
+					logger.Printf("route=%s slot=%d: target unavailable, suppressing further logs (retrying silently)", route.ID, slot)
+				} else {
+					logger.Printf("route=%s slot=%d disconnected: %v", route.ID, slot, err)
+				}
+				lastLoggedFail = time.Now()
+			}
+		} else {
+			if consecutiveFails > suppressAfter {
+				logger.Printf("route=%s slot=%d: reconnected after %d failures", route.ID, slot, consecutiveFails)
+			}
+			consecutiveFails = 0
+			attempt = 0 // reset backoff on successful connection
 		}
 
 		select {

@@ -393,15 +393,21 @@ func (a *VMAgent) runTunnelConnection(ctx context.Context, route RouteConfig, sl
 		case <-ctx.Done():
 			return
 		default:
-			if err := a.establishTunnelConnection(route); err != nil {
-				a.Logger.Printf("tunnel connection failed for route %s slot %d: %v", route.ID, slot, err)
-			}
-			time.Sleep(5 * time.Second)
+		}
+		if err := a.establishTunnelConnection(ctx, route); err != nil {
+			a.Logger.Printf("tunnel connection failed for route %s slot %d: %v", route.ID, slot, err)
+		}
+		// Honor ctx during the retry backoff — previously time.Sleep here
+		// meant shutdown blocked up to 5s per tunnel × PoolSize.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
 		}
 	}
 }
 
-func (a *VMAgent) establishTunnelConnection(route RouteConfig) error {
+func (a *VMAgent) establishTunnelConnection(ctx context.Context, route RouteConfig) error {
 	target := fmt.Sprintf("%s:%d", route.Target, route.Port)
 	key := route.ID + "|" + target
 
@@ -414,20 +420,43 @@ func (a *VMAgent) establishTunnelConnection(route RouteConfig) error {
 		if elapsed < 5*time.Minute {
 			remaining := 5*time.Minute - elapsed
 			a.failedTunnelsMu.Unlock()
-			time.Sleep(remaining)
+			// Wait honoring ctx — previously up to 5 min of unstoppable sleep
+			// blocked the caller past shutdown.
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(remaining):
+			}
 			return nil
 		}
 		delete(a.failedTunnels, key)
 	}
 	a.failedTunnelsMu.Unlock()
 
-	a.Logger.Printf("establishing tunnel connection to %s", target)
+	// Only log on the very first attempt (no prior failure record).
+	a.failedTunnelsMu.Lock()
+	_, seen := a.failedTunnels[key+"_seen"]
+	if !seen {
+		a.failedTunnels[key+"_seen"] = time.Now()
+		a.Logger.Printf("establishing tunnel connection to %s (route=%s)", target, route.ID)
+	}
+	a.failedTunnelsMu.Unlock()
 
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(100 * time.Millisecond):
+	}
 
-	if (route.Target == "127.0.0.1" || route.Target == "localhost") && (route.Port == 22 || route.Port == 8082) {
+	// Mark gateway-self routes and unavailable local services as failed so
+	// they back off for 5 minutes instead of retrying every 5 seconds.
+	isLocalGateway := (route.Target == "127.0.0.1" || route.Target == "localhost") && route.Port == 8080
+	isUnavailable := (route.Target == "127.0.0.1" || route.Target == "localhost") && (route.Port == 22 || route.Port == 8082)
+	if isLocalGateway || isUnavailable {
 		a.failedTunnelsMu.Lock()
-		a.failedTunnels[key] = time.Now()
+		if _, already := a.failedTunnels[key]; !already {
+			a.failedTunnels[key] = time.Now()
+		}
 		a.failedTunnelsMu.Unlock()
 	}
 
@@ -664,8 +693,10 @@ func (a *VMAgent) runEncodingSession(ctx context.Context, session *EncoderSessio
 
 	session.cmd = cmd
 
-	httpClient := &http.Client{Timeout: 5 * time.Second}
-	a.HTTPClient = httpClient
+	// a.HTTPClient is initialised once in NewVMAgent with the same timeout.
+	// Reassigning it here from every session start was a data race against
+	// sendMetrics / other goroutines and also leaked the previous client's
+	// idle-conn pool. Reuse the shared client instead.
 
 	go func() {
 		muxer := newRTPMuxer()
@@ -836,6 +867,10 @@ func (a *VMAgent) sendEncodedData(sessionID string, data []byte) error {
 	if err != nil {
 		return err
 	}
+	// Drain the body before Close so Go can reuse the TCP connection —
+	// otherwise every POST opens a fresh socket, and at 60 FPS the agent
+	// exhausts local ephemeral ports within minutes.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	return nil
 }
@@ -933,6 +968,11 @@ func startCodeLength(buf []byte, pos int) int {
 	return 3
 }
 
+// maxCarryBytes caps the leftover buffer between parseNALUnits calls. Without
+// this cap a stalled or malformed encoder stream (no start codes emitted for
+// a while) would grow *carry unboundedly and eventually OOM the host agent.
+const maxCarryBytes = 4 * 1024 * 1024
+
 func parseNALUnits(data []byte, carry *[]byte) [][]byte {
 	buf := append(*carry, data...)
 	var nals [][]byte
@@ -940,13 +980,22 @@ func parseNALUnits(data []byte, carry *[]byte) [][]byte {
 	for {
 		start := findStartCode(buf, i)
 		if start < 0 {
+			// No start code found — keep only the tail (bounded) so an
+			// encoder that stops emitting frames can't blow up memory.
+			if len(buf) > maxCarryBytes {
+				buf = buf[len(buf)-maxCarryBytes:]
+			}
 			*carry = buf
 			break
 		}
 		payloadStart := start + startCodeLength(buf, start)
 		next := findStartCode(buf, payloadStart)
 		if next < 0 {
-			*carry = buf[payloadStart:]
+			tail := buf[payloadStart:]
+			if len(tail) > maxCarryBytes {
+				tail = tail[len(tail)-maxCarryBytes:]
+			}
+			*carry = tail
 			break
 		}
 		nals = append(nals, buf[payloadStart:next])
@@ -1073,22 +1122,58 @@ func (a *VMAgent) collectMetrics() HostMetrics {
 }
 
 func (a *VMAgent) getCPUUsage() float64 {
-	// Simplified CPU usage calculation
-	// In production, this would use proper system metrics
-	return 25.0
+	// Linux: parse /proc/stat for a real idle ratio.
+	if runtime.GOOS == "linux" {
+		data, err := os.ReadFile("/proc/stat")
+		if err == nil {
+			lines := strings.SplitN(string(data), "\n", 2)
+			if len(lines) > 0 {
+				var user, nice, sys, idle, iowait, irq, softirq uint64
+				fmt.Sscanf(lines[0], "cpu %d %d %d %d %d %d %d", &user, &nice, &sys, &idle, &iowait, &irq, &softirq)
+				total := user + nice + sys + idle + iowait + irq + softirq
+				if total > 0 {
+					used := total - idle - iowait
+					return float64(used) * 100.0 / float64(total)
+				}
+			}
+		}
+	}
+	return 0.0
 }
 
 func (a *VMAgent) getRAMUsage() float64 {
-	// Simplified RAM usage calculation
-	// In production, this would use proper system metrics
-	return 45.0
+	// Linux: parse /proc/meminfo for a real reading.
+	if runtime.GOOS == "linux" {
+		data, err := os.ReadFile("/proc/meminfo")
+		if err == nil {
+			var total, available uint64
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(line, "MemTotal:") {
+					fmt.Sscanf(line, "MemTotal: %d", &total)
+				} else if strings.HasPrefix(line, "MemAvailable:") {
+					fmt.Sscanf(line, "MemAvailable: %d", &available)
+				}
+			}
+			if total > 0 {
+				used := total - available
+				return float64(used) * 100.0 / float64(total)
+			}
+		}
+	}
+	return 0.0
 }
 
 func (a *VMAgent) getGPUUsage() float64 {
-	// Simplified GPU usage calculation
-	// In production, this would use proper GPU metrics
-	if a.Config.GPUEnabled {
-		return 60.0
+	if !a.Config.GPUEnabled {
+		return 0.0
+	}
+	// Try nvidia-smi for a real reading; fall back to 0 on Windows/no-GPU.
+	out, err := exec.Command("nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits").Output()
+	if err == nil {
+		var v float64
+		if _, scanErr := fmt.Sscanf(strings.TrimSpace(string(out)), "%f", &v); scanErr == nil {
+			return v
+		}
 	}
 	return 0.0
 }
@@ -1149,12 +1234,20 @@ func (a *VMAgent) sendMetrics(metrics HostMetrics) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.Token)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	// Reuse the shared client so idle-conn pools aren't reset on every metrics
+	// tick (called every 5-10s). Building a fresh client per call bypassed the
+	// pool and gradually exhausted ephemeral ports over long runs.
+	client := a.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	// Drain body before Close so Go can reuse the TCP connection.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("metrics submission failed with status %d", resp.StatusCode)

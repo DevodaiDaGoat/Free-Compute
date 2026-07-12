@@ -113,9 +113,11 @@ func (c *DNSCache) Refresh(host string) {
 }
 
 func (c *DNSCache) Stats() (hits, misses int64) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.hits, c.misses
+	// hits/misses are mutated via atomic.AddInt64 by LookupHost/LookupAddr on
+	// the fast path. Reading them under RLock is a mixed-access data race —
+	// the RLock does not synchronize with atomic stores. Use atomic loads to
+	// stay consistent with the write path.
+	return atomic.LoadInt64(&c.hits), atomic.LoadInt64(&c.misses)
 }
 
 func (c *DNSCache) Len() int {

@@ -27,7 +27,23 @@ const (
 	webSocketOpcodePong      = 0xA
 	maxWebSocketFrameBytes   = 1024 * 1024
 	maxWebSocketMessageBytes = 1024 * 1024
+	// wsSmallFrameThreshold is the max payload size to pool. Control frames
+	// are at most 125 bytes; most signaling messages are under 4 KB.
+	wsSmallFrameThreshold = 4096
 )
+
+// wsSmallFramePool recycles fixed-size [wsSmallFrameThreshold]byte arrays
+// so that the hot path in readFrame() does not allocate on every call.
+var wsSmallFramePool = sync.Pool{
+	New: func() any {
+		// We store a pointer to avoid interface boxing of the array.
+		b := make([]byte, wsSmallFrameThreshold)
+		return &b
+	},
+}
+
+func wsGetSmallFrame() *[]byte { return wsSmallFramePool.Get().(*[]byte) }
+func wsPutSmallFrame(b *[]byte) { wsSmallFramePool.Put(b) }
 
 type webSocketBridge struct {
 	conn        net.Conn
@@ -146,12 +162,14 @@ func (s *Server) bridgeWebSocketToTCP(route *Route, bridge *webSocketBridge, ups
 	}()
 
 	err := <-errCh
-	// Drain second error to prevent goroutine leak
+	// Close both connections immediately so the second goroutine unblocks
+	// rather than waiting for IdleTimeout to expire.
+	_ = upstream.Close()
+	_ = bridge.conn.Close()
 	<-errCh
 	if err != nil && !errors.Is(err, io.EOF) {
 		s.logger.Printf("websocket tunnel route=%s closed=%v", route.ID, err)
 	}
-	_ = bridge.writeClose()
 }
 
 func (s *Server) bridgeWebSocketToUDP(route *Route, bridge *webSocketBridge, upstream *net.UDPConn) {
@@ -197,12 +215,12 @@ func (s *Server) bridgeWebSocketToUDP(route *Route, bridge *webSocketBridge, ups
 	}()
 
 	err := <-errCh
-	// Drain second error to prevent goroutine leak
+	_ = upstream.Close()
+	_ = bridge.conn.Close()
 	<-errCh
 	if err != nil && !errors.Is(err, io.EOF) {
 		s.logger.Printf("websocket udp tunnel route=%s closed=%v", route.ID, err)
 	}
-	_ = bridge.writeClose()
 }
 
 func writeAll(writer io.Writer, payload []byte) error {
@@ -403,12 +421,35 @@ func (b *webSocketBridge) readFrame() (bool, byte, []byte, error) {
 		return false, 0, nil, fmt.Errorf("websocket frame too large for platform: %d", payloadLen)
 	}
 
-	payload := make([]byte, payloadSize)
+	// For small frames (control + most signaling messages) reuse a pooled
+	// buffer to avoid per-frame heap allocation. For large frames, allocate
+	// directly — pooling variable-size slices is unsafe.
+	var payload []byte
+	var pooledBuf *[]byte
+	if payloadSize <= wsSmallFrameThreshold {
+		pooledBuf = wsGetSmallFrame()
+		payload = (*pooledBuf)[:payloadSize]
+	} else {
+		payload = make([]byte, payloadSize)
+	}
 	if _, err := io.ReadFull(b.rw, payload); err != nil {
+		if pooledBuf != nil {
+			wsPutSmallFrame(pooledBuf)
+		}
 		return false, 0, nil, err
 	}
 
 	unmask(payload, mask)
+
+	// For small pooled frames, copy the unmasked data into a fresh slice and
+	// return the pooled buffer immediately. This keeps the pool buffer-lifecycle
+	// correct — callers may hold the returned slice for an arbitrary duration.
+	if pooledBuf != nil {
+		out := make([]byte, payloadSize)
+		copy(out, payload)
+		wsPutSmallFrame(pooledBuf)
+		return fin, opcode, out, nil
+	}
 
 	return fin, opcode, payload, nil
 }

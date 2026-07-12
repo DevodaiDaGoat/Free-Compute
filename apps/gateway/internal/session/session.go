@@ -336,8 +336,11 @@ func (m *SessionManager) CreateSession(ctx context.Context, req *CreateSessionRe
 		"hostId":      host.ID,
 	})
 
-	// Start provisioning
-	go m.provisionSession(ctx, session)
+	// Start provisioning with a fresh Background context — the HTTP handler's
+	// ctx is cancelled when the client disconnects, so using it here cancelled
+	// provisioning on any normal completed HTTP request. The approval path at
+	// line 430 already uses Background(); align this path with it.
+	go m.provisionSession(context.Background(), session)
 
 	m.logger.Printf("created session %s (type=%s, mode=%s, host=%s)", sessionID, req.Type, req.Mode, host.ID)
 
@@ -501,13 +504,15 @@ func (m *SessionManager) EndSession(sessionID string, reason string) error {
 
 	m.logger.Printf("ended session %s (reason: %s)", sessionID, reason)
 
-	// Clean up after delay
-	go func() {
-		time.Sleep(5 * time.Minute)
+	// Clean up after delay. Using time.AfterFunc so the runtime schedules a
+	// single-shot timer instead of stranding a goroutine that sleeps 5min
+	// with no cancellation path — one per ended session added up fast on a
+	// gateway that saw hundreds of connections.
+	time.AfterFunc(5*time.Minute, func() {
 		m.sessionsMutex.Lock()
 		delete(m.sessions, sessionID)
 		m.sessionsMutex.Unlock()
-	}()
+	})
 
 	return nil
 }
@@ -567,8 +572,19 @@ func (m *SessionManager) provisionSession(ctx context.Context, session *Session)
 	session.UpdatedAt = time.Now()
 	session.Mutex.Unlock()
 
-	// Simulate provisioning (in real implementation, this would communicate with host agent)
-	time.Sleep(5 * time.Second)
+	// Simulate provisioning (in real implementation, this would communicate
+	// with host agent). Use a select on ctx.Done so a client disconnect or
+	// server shutdown aborts the 5-second wait instead of stalling a goroutine.
+	select {
+	case <-time.After(5 * time.Second):
+	case <-ctx.Done():
+		session.Mutex.Lock()
+		session.State = SessionStateFailed
+		session.UpdatedAt = time.Now()
+		session.Mutex.Unlock()
+		m.logger.Printf("provisioning aborted for session %s: %v", session.ID, ctx.Err())
+		return
+	}
 
 	// Update state to connecting
 	session.Mutex.Lock()

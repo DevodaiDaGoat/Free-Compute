@@ -1,4 +1,4 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import type { ReactNode } from 'react';
 
 import './globals.css';
@@ -9,7 +9,6 @@ export const metadata: Metadata = {
   title: 'FreeCompute Console',
   description: 'Remote access, game streaming, and universal proxy operations console.',
   manifest: '/manifest.json',
-  themeColor: '#17211c',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
@@ -18,6 +17,10 @@ export const metadata: Metadata = {
   other: {
     'mobile-web-app-capable': 'yes',
   },
+};
+
+export const viewport: Viewport = {
+  themeColor: '#17211c',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

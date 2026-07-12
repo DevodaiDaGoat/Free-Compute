@@ -105,6 +105,21 @@ func (t *Tracker) Track(userID string, resource ResourceType, value float64) {
 		Unit:      unitFor(resource),
 		StartedAt: time.Now(),
 	})
+
+	// Opportunistically prune records older than 30 days when the slice grows
+	// past 512 entries. Older records are never read (calculateUsage / GetUsage
+	// filter by 30-day window) so keeping them is a slow memory leak.
+	records := t.records[userID]
+	if len(records) > 512 {
+		cutoff := time.Now().Add(-30 * 24 * time.Hour)
+		kept := records[:0]
+		for _, r := range records {
+			if r.StartedAt.After(cutoff) {
+				kept = append(kept, r)
+			}
+		}
+		t.records[userID] = kept
+	}
 }
 
 func (t *Tracker) GetUsage(userID string, since time.Time) *UsageSummary {
@@ -232,8 +247,12 @@ func (t *Tracker) GenerateInvoice(userID string, since, until time.Time) *Invoic
 		total += itemTotal
 	}
 
+	shortID := userID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
 	return &Invoice{
-		ID:          fmt.Sprintf("inv_%s_%d", userID[:8], since.Unix()),
+		ID:          fmt.Sprintf("inv_%s_%d", shortID, since.Unix()),
 		UserID:      userID,
 		PeriodStart: since,
 		PeriodEnd:   until,
@@ -252,7 +271,18 @@ func (t *Tracker) HandleUsage(w http.ResponseWriter, r *http.Request) {
 
 	days := 7
 	if d := r.URL.Query().Get("days"); d != "" {
-		fmt.Sscanf(d, "%d", &days)
+		var parsed int
+		if _, err := fmt.Sscanf(d, "%d", &parsed); err == nil {
+			// Clamp to a sane range. Negative days would make `since` land in
+			// the future so every query returned nothing; huge values would
+			// scan the entire recording set uselessly.
+			if parsed < 1 {
+				parsed = 1
+			} else if parsed > 365 {
+				parsed = 365
+			}
+			days = parsed
+		}
 	}
 
 	since := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
@@ -312,7 +342,9 @@ func unitFor(resource ResourceType) string {
 	case ResourceGPU:
 		return "GPU-seconds"
 	case ResourceNetwork:
-		return "GB"
+		// tunnel/server.handleHostMetrics feeds float64(bytesOut) into Track,
+		// so the raw values are bytes; the human label is bytes, not GB.
+		return "bytes"
 	case ResourceSessions:
 		return "count"
 	default:

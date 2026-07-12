@@ -1,307 +1,97 @@
-uh so baisically read the md files in the repo and this md formatted text and you can get the whole gist
+# FreeCompute — TODO
 
-<div align="center">
-# FreeCompute
-### Community-Powered Cloud Computing
-Launch secure cloud desktops, development environments, and gaming sessions directly from your browser.
-Powered by donated computers and cloud infrastructure.
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-Pre--Alpha-orange)]()
-[![Platform](https://img.shields.io/badge/platform-Web-blue)]()
-[![Made With](https://img.shields.io/badge/Made%20With-Go%20%7C%20Next.js%20%7C%20React-success)]()
-</div>
----
-# 🚀 What is FreeCompute?
-FreeCompute is an open-source distributed cloud computing platform that allows users to launch virtual desktops directly from their browser.
-Instead of relying entirely on expensive cloud providers, FreeCompute combines donated computers, community-hosted machines, and cloud infrastructure into one distributed network.
-Whether you're developing software, browsing the web, testing applications, or gaming remotely, FreeCompute provides secure virtual machines that are accessible from anywhere.
----
-# ✨ Features
-## 🌐 Browser-Based Desktop
-- Custom WebOS
-- File manager
-- Terminal
-- Browser
-- Window manager
-- Multiple applications
-- Virtual desktops
-- Responsive interface
----
-## 💻 Community-Powered Infrastructure
-Contribute idle hardware to the network.
-Donate:
-- CPU
-- RAM
-- GPU
-- Storage
-- Bandwidth
-Receive community rewards while helping others.
----
-## ⚡ Smart Galaxy Scheduler
-Automatically selects the best available machine based on:
-- Region
-- Network latency
-- CPU utilization
-- RAM availability
-- GPU availability
-- Host health
-- Queue length
-- Resource requirements
----
-## 🎮 Gaming Support
-Gaming is a first-class feature.
-Supported:
-- Browser streaming
-- Controller support
-- Fullscreen mode
-- Low-latency streaming
-- GPU scheduling
-- Adaptive bitrate
-- Adaptive resolution
-Future plans:
-- Steam integration
-- Game launcher
-- Cloud save support
-- Dedicated gaming hosts
----
-## 🖥 Remote Desktop
-Secure remote desktop sessions.
-Features include:
-- Browser access
-- Clipboard sync
-- File transfers
-- Audio forwarding
-- Multiple display support (planned)
-- Temporary session links
-- Secure authentication
----
-## 💳 Credit System
-FreeCompute uses Credits instead of subscriptions.
-Credits may be earned by:
-- Hosting computers
-- Community testing
-- Bug reports
-- Events
-- Contributions
-- Optional purchases (future)
-Credits can unlock:
-- More CPU
-- More RAM
-- GPU access
-- Longer sessions
-- Priority queue
----
-## 🔒 Security
-Security is built into every layer.
-Features include:
-- Email verification
-- Optional multi-factor authentication
-- Signed host agents
-- JWT authentication
-- TLS encryption
-- Session isolation
-- Sandboxed virtual machines
-- Malware scanning for uploads
-- Audit logging
-- Role-based permissions
----
-# 🏗 Architecture
-```
-                Internet
-                    │
-          Cloudflare Tunnel
-                    │
-             API Gateway
-                    │
-          Authentication Service
-                    │
-             Orchestrator
-                    │
-           Galaxy Scheduler
-                    │
-      ┌─────────────┴─────────────┐
-      │                           │
- Community Hosts           Cloud Hosts
-      │                           │
-      └─────────────┬─────────────┘
-                    │
-              Virtual Machine
-                    │
-            WebRTC Streaming
-                    │
-              Browser Client
-```
----
-# 📦 Monorepo Structure
-```
-apps/
-    frontend/
-    gateway/
-    auth-service/
-    scheduler/
-    billing-service/
-    file-service/
-    host-control/
-    admin-api/
-    notifications/
-    orchestrator/
-desktop/
-host-agent/
-packages/
-    ui/
-    api-types/
-    utils/
-    config/
-    logger/
-    database/
-    auth/
-    websocket/
-    theme/
-    sdk/
-docs/
-scripts/
-infrastructure/
-tests/
-```
----
-# 🖥 WebOS
-FreeCompute includes a custom browser-based operating system.
-Applications include:
-- Terminal
-- Browser
-- Files
-- Settings
-- Task Manager
-- System Monitor
-- Store
-Future applications:
-- VS Code
-- Firefox
-- Chrome
-- Discord
-- Steam
-- Minecraft Launcher
----
-# 🛰 Host Agent
-Users can contribute computers securely.
-The Host Agent provides:
-- Automatic registration
-- Heartbeats
-- Resource monitoring
-- Secure communication
-- Automatic updates
-- Job execution
-- Crash recovery
-- Usage reporting
----
-# 🧠 Galaxy Scheduler
-The scheduler continuously evaluates:
-- Host health
-- Region
-- Latency
-- CPU usage
-- RAM usage
-- GPU availability
-- Queue length
-- Storage
-- Network quality
-Its goal is to provide the best experience while protecting host machines from overload.
----
-# 🧩 Tech Stack
-## Frontend
-- Next.js 15
-- React 19
-- TypeScript
-- Tailwind CSS v4
-- shadcn/ui
-- Framer Motion
-- Zustand
-- TanStack Query
-- React Hook Form
-- Zod
-## Backend
-- Go
-- Node.js
-- PostgreSQL
-- Redis
-- WebSockets
-## Desktop
-- React
-- TypeScript
-- WebRTC
-## Infrastructure
-- Docker
-- Docker Compose
-- Kubernetes
-- GitHub Actions
-- Cloudflare Tunnel
----
-# 📈 Roadmap
-## Phase 1
-- Monorepo
-- Shared UI
-- Landing page
-- Authentication
-- Dashboard
-## Phase 2
-- Queue
-- Credit system
-- Host Agent
-- Scheduler
-- Basic Linux VM
-## Phase 3
-- WebOS
-- Window manager
-- Terminal
-- File manager
-- Browser
-## Phase 4
-- GPU scheduling
-- Gaming mode
-- Remote desktop improvements
-- Persistent storage
-- Snapshots
-## Phase 5
-- Global infrastructure
-- High availability
-- Marketplace
-- Public API
-- SDK
----
-# 🤝 Contributing
-Contributions are welcome.
-Please read:
-- CONTRIBUTING.md
-- CODE_OF_CONDUCT.md
-- SECURITY.md
-before opening a Pull Request.
----
-# 📖 Documentation
-Project documentation lives inside:
-```
-docs/
-```
-Including:
-- Architecture
-- API
-- Development Guide
-- Desktop Design
-- Backend Services
-- Scheduler
-- Deployment
----
-# 🌎 Vision
-Our long-term goal is to build a free, open-source cloud computing platform powered by the community.
-Instead of requiring expensive infrastructure, FreeCompute allows anyone to contribute unused computing resources to help power desktops, development environments, and remote workloads for others.
-By combining donated hardware with cloud infrastructure, we aim to make secure, browser-based computing more accessible while remaining transparent, extensible, and community-driven.
----
-# 📜 License
-Released under the MIT License.
-See LICENSE for more information.
----
-<div align="center">
-### ⭐ If you like this project, consider starring the repository!
-Built with ❤️ by the FreeCompute community.
-</div>
+> See `todo.txt` in the repo root for the quick-reference change index.
+> This file tracks detailed work items.
 
-i just need this before august
+## Done (July 2026)
+
+### Backend
+- [x] Gateway: JWT auth, register, login, preferences, roles (user/moderator/admin)
+- [x] Gateway: SQLite DB with WAL, idempotent migrations, indexes
+- [x] Gateway: Session manager, host allocator, Galaxy scheduler
+- [x] Gateway: WebRTC pipeline — H.264/H.265/VP8/VP9/AV1, adaptive bitrate (GCC)
+- [x] Gateway: Multiplexed binary WebSocket tunnel (typed channels, ping/pong RTT)
+- [x] Gateway: Security detector — crypto-miner signatures, traffic anomaly, AI moderation flag
+- [x] Gateway: Report system (POST /reports, moderator action, conditional LLM triage)
+- [x] Gateway: Storage with per-user quota, path traversal protection
+- [x] Gateway: Usage tracking, quota enforcement, invoice generation
+- [x] Gateway: SSH key management, VM image catalog, firewall rules engine
+- [x] Gateway: Rate limiter (token bucket per IP + per user), connection limit per user
+- [x] Gateway: Prometheus metrics, health checker, DNS cache, proxy cache
+- [x] Host Agent: Reverse tunnel client, capability reporting, reconnect with backoff
+- [x] Host Agent: VM-setup agent — env-driven config, --dry-run, --self-test, 50% resource default
+- [x] Security hardening:
+  - CORS origin allowlist (no wildcard + credentials)
+  - /hosts/register + /hosts/metrics require tunnel token (was public)
+  - Usage IDOR fixed (userId forced from JWT, not query param)
+  - User enumeration fixed (same 401 for wrong email/password)
+  - Error messages no longer leak internal paths/stack traces
+  - Password minimum length enforced (8 chars)
+  - Email format validation on register
+
+### Frontend / WebOS
+- [x] Landing page (macOS-style dark, features, architecture, contribute CTA)
+- [x] Connection Space (/connect) — session manager, WebRTC stream viewer
+- [x] WebOS boot sequence (BIOS POST → loading → login → desktop)
+- [x] macOS-style desktop: menu bar, floating dock with magnification, desktop grid
+- [x] Alt-Tab switcher (overlay, cycles on key release)
+- [x] Spotlight launcher (Ctrl+Space, searchable)
+- [x] Window manager: traffic lights, drag, resize, maximize, minimize
+- [x] Apps: Terminal, Browser, Files, Settings, Calculator, Admin Panel, Task Manager
+- [x] Apps: Remote Desktop (stream + SSH terminal + Tailscale tab)
+- [x] Apps: App Player (install/run/remove packages, terminal console)
+- [x] Apps: Host Monitor (live CPU/RAM/disk per host, active sessions)
+- [x] Apps: Credits & Billing (buy credits, crypto deposits, earn free, history)
+- [x] Apps: AI Log Monitor (real-time heuristic threat analysis, GPU detection)
+- [x] Security headers (CSP, HSTS, CORP, COOP)
+- [x] CORS fixed (was blocking all API calls)
+
+## In Progress
+
+- [ ] Phase 4 — Connection quality improvements (docs/CONNECTION_QUALITY.md)
+  - WebTransport / QUIC (needs quic-go wired to /wt/ endpoint)
+  - Adaptive jitter buffer
+  - Multi-channel WebRTC data layer
+
+## Needs Real Dependencies (install on host)
+
+- [ ] QEMU VM launch — needs `qemu-system-x86_64` in PATH
+- [ ] FFmpeg encoding — needs `ffmpeg` in PATH
+- [ ] Tailscale mesh — needs `tailscale` installed and logged in
+- [ ] Stripe payments — needs `STRIPE_SECRET_KEY`
+- [ ] LLM moderation — needs `FREECOMPUTE_MODERATION_LLM_URL`
+
+## Planned (Phase 5+)
+
+- [ ] Cloud saves / persistent home directories (NFS or S3FS)
+- [ ] Collaborative sessions (multi-cursor, role-based)
+- [ ] Steam integration / game launcher
+- [ ] Horizontal scaling (multiple gateway replicas)
+- [ ] Public embed API (REST + WebSocket SDK)
+- [ ] Global CDN + multi-region (BunnyCDN + edge workers)
+- [ ] Real Stripe billing integration
+- [ ] Mobile PWA (docs/MOBILE_PWA.md)
+- [ ] WebOS app store with signed packages
+
+## Bug Tracker
+
+| ID | Status | Description |
+|----|--------|-------------|
+| BUG-01 | Fixed | BandwidthEstimator type collision (adaptive_bitrate.go vs bandwidth.go) |
+| BUG-02 | Fixed | handleHostMetrics passed 0 instead of activeStreams |
+| BUG-03 | Fixed | RouteRegistry interface returned Route value (should be *Route) |
+| BUG-04 | Fixed | UpdateHostLoad marked idle hosts offline (zero load = offline) |
+| BUG-05 | Fixed | bridgeWebSocket goroutine drain waited IdleTimeout on error |
+| BUG-06 | Fixed | GenerateInvoice panic on short userID (slice bounds) |
+| BUG-07 | Fixed | storage DeleteFile never decremented usage |
+| BUG-08 | Fixed | usage Tracker.Track memory leak (never pruned old records) |
+| BUG-09 | Fixed | storage WriteFile appended duplicate FileInfo on overwrite |
+| BUG-10 | Fixed | Rate limiter bucket mutated without mutex (race condition) |
+| BUG-11 | Fixed | dialViaTailscale leaked N-1 racing connections |
+| BUG-12 | Fixed | WriteVideoRTP/WriteAudioRTP held write-lock per RTP packet |
+| BUG-13 | Fixed | CORS blocked all API calls (missing Allow-Origin header) |
+| BUG-14 | Fixed | page.tsx added duplicate nav bar over Desktop menu bar |
+| BUG-15 | Fixed | /hosts/register and /hosts/metrics were unauthenticated |
+| BUG-16 | Fixed | Usage IDOR — any user could query other user's usage data |
+| BUG-17 | Fixed | User enumeration — different errors for wrong email vs wrong password |
+| BUG-18 | Fixed | openApp in Desktop captured stale windows state (moved to setWindows updater) |

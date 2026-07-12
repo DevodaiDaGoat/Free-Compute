@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Minimize2, Maximize2, X } from 'lucide-react';
+import { Minus, Maximize2, X } from 'lucide-react';
 import type { AppWindow } from '../system/types';
 import type { ReactNode } from 'react';
 
@@ -16,12 +16,14 @@ interface Props {
   onResize: (w: number, h: number) => void;
 }
 
-const titleBarH = 36;
+const TITLEBAR_H = 38;
 
 export default function Window({ window: win, appComponents, onFocus, onClose, onMinimize, onMaximize, onMove, onResize }: Props) {
   const ref = useRef<HTMLDivElement>(null);
-  const drag = useRef({ dragging: false, startX: 0, startY: 0, startWinX: 0, startWinY: 0 });
-  const resize = useRef({ resizing: false, startX: 0, startY: 0, startW: 0, startH: 0, dir: '' });
+  const dragRef = useRef({ active: false, startX: 0, startY: 0, startWinX: 0, startWinY: 0 });
+  const resizeRef = useRef({ active: false, startX: 0, startY: 0, startW: 0, startH: 0 });
+  const listenersRef = useRef<{ move: ((ev: MouseEvent) => void) | null; up: (() => void) | null }>({ move: null, up: null });
+
   const [size, setSize] = useState({ w: win.width, h: win.height });
   const [pos, setPos] = useState({ x: win.x, y: win.y });
 
@@ -30,54 +32,62 @@ export default function Window({ window: win, appComponents, onFocus, onClose, o
     setPos({ x: win.x, y: win.y });
   }, [win.width, win.height, win.x, win.y]);
 
-  const onMouseDown = useCallback((e: React.MouseEvent) => {
-    onFocus();
-    drag.current = { dragging: true, startX: e.clientX, startY: e.clientY, startWinX: pos.x, startWinY: pos.y };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-  }, [pos, onFocus]);
-
-  const onMouseMove = useCallback((e: MouseEvent) => {
-    if (!drag.current.dragging) return;
-    const dx = e.clientX - drag.current.startX;
-    const dy = e.clientY - drag.current.startY;
-    const newX = Math.max(0, drag.current.startWinX + dx);
-    const newY = Math.max(0, drag.current.startWinY + dy);
-    setPos({ x: newX, y: newY });
-    onMove(newX, newY);
-  }, [onMove]);
-
-  const onMouseUp = useCallback(() => {
-    drag.current.dragging = false;
-    document.removeEventListener('mousemove', onMouseMove);
-    document.removeEventListener('mouseup', onMouseUp);
+  useEffect(() => {
+    return () => {
+      dragRef.current.active = false;
+      resizeRef.current.active = false;
+      if (listenersRef.current.move) document.removeEventListener('mousemove', listenersRef.current.move);
+      if (listenersRef.current.up) document.removeEventListener('mouseup', listenersRef.current.up);
+      listenersRef.current = { move: null, up: null };
+    };
   }, []);
 
-  const onResizeStart = useCallback((dir: string) => (e: React.MouseEvent) => {
+  const handleTitleBarMouseDown = useCallback((e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('button')) return;
+    e.preventDefault();
+    onFocus();
+    dragRef.current = { active: true, startX: e.clientX, startY: e.clientY, startWinX: pos.x, startWinY: pos.y };
+
+    const handleMove = (ev: MouseEvent) => {
+      if (!dragRef.current.active) return;
+      const newX = Math.max(0, dragRef.current.startWinX + ev.clientX - dragRef.current.startX);
+      const newY = Math.max(0, dragRef.current.startWinY + ev.clientY - dragRef.current.startY);
+      setPos({ x: newX, y: newY });
+      onMove(newX, newY);
+    };
+    const handleUp = () => {
+      dragRef.current.active = false;
+      document.removeEventListener('mousemove', handleMove);
+      document.removeEventListener('mouseup', handleUp);
+      listenersRef.current = { move: null, up: null };
+    };
+    listenersRef.current = { move: handleMove, up: handleUp };
+    document.addEventListener('mousemove', handleMove);
+    document.addEventListener('mouseup', handleUp);
+  }, [pos, onFocus, onMove]);
+
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    resize.current = { resizing: true, startX: e.clientX, startY: e.clientY, startW: size.w, startH: size.h, dir };
-    document.addEventListener('mousemove', onResizeMove);
-    document.addEventListener('mouseup', onResizeEnd);
-  }, [size]);
+    resizeRef.current = { active: true, startX: e.clientX, startY: e.clientY, startW: size.w, startH: size.h };
 
-  const onResizeMove = useCallback((e: MouseEvent) => {
-    if (!resize.current.resizing) return;
-    const dx = e.clientX - resize.current.startX;
-    const dy = e.clientY - resize.current.startY;
-    let newW = size.w;
-    let newH = size.h;
-    if (resize.current.dir.includes('e')) newW = Math.max(400, resize.current.startW + dx);
-    if (resize.current.dir.includes('s')) newH = Math.max(200, resize.current.startH + dy);
-    setSize({ w: newW, h: newH });
-    onResize(newW, newH);
+    const handleMove = (ev: MouseEvent) => {
+      if (!resizeRef.current.active) return;
+      const newW = Math.max(380, resizeRef.current.startW + ev.clientX - resizeRef.current.startX);
+      const newH = Math.max(200, resizeRef.current.startH + ev.clientY - resizeRef.current.startY);
+      setSize({ w: newW, h: newH });
+      onResize(newW, newH);
+    };
+    const handleUp = () => {
+      resizeRef.current.active = false;
+      document.removeEventListener('mousemove', handleMove);
+      document.removeEventListener('mouseup', handleUp);
+      listenersRef.current = { move: null, up: null };
+    };
+    listenersRef.current = { move: handleMove, up: handleUp };
+    document.addEventListener('mousemove', handleMove);
+    document.addEventListener('mouseup', handleUp);
   }, [size, onResize]);
-
-  const onResizeEnd = useCallback(() => {
-    resize.current.resizing = false;
-    document.removeEventListener('mousemove', onResizeMove);
-    document.removeEventListener('mouseup', onResizeEnd);
-  }, []);
 
   const AppComponent = appComponents[win.app];
   const isMaximized = win.maximized;
@@ -85,47 +95,125 @@ export default function Window({ window: win, appComponents, onFocus, onClose, o
   return (
     <div
       ref={ref}
+      onClick={onFocus}
       style={{
         position: 'absolute',
         left: isMaximized ? 0 : pos.x,
         top: isMaximized ? 0 : pos.y,
         width: isMaximized ? '100%' : size.w,
-        height: isMaximized ? 'calc(100vh - 44px)' : size.h,
+        height: isMaximized ? 'calc(100vh - 46px)' : size.h,
         zIndex: win.zIndex,
-        border: '1px solid #2a2a4a',
-        borderRadius: 8,
+        border: `1px solid ${win.focused ? 'rgba(88,166,255,0.25)' : 'rgba(48,54,61,0.6)'}`,
+        borderRadius: isMaximized ? 0 : 10,
         overflow: 'hidden',
         display: 'flex',
         flexDirection: 'column',
-        boxShadow: win.focused ? '0 8px 32px rgba(0,0,0,0.5)' : '0 2px 8px rgba(0,0,0,0.3)',
+        boxShadow: win.focused
+          ? '0 16px 48px rgba(0,0,0,0.6), 0 0 0 1px rgba(88,166,255,0.1)'
+          : '0 4px 16px rgba(0,0,0,0.4)',
+        transition: 'box-shadow 0.15s, border-color 0.15s',
       }}
     >
+      {/* Title bar */}
       <div
-        onMouseDown={onMouseDown}
+        onMouseDown={handleTitleBarMouseDown}
         style={{
-          height: titleBarH,
-          background: win.focused ? '#1a1a3e' : '#111128',
+          height: TITLEBAR_H,
+          background: win.focused ? 'rgba(22,27,34,0.98)' : 'rgba(13,17,23,0.95)',
+          borderBottom: `1px solid ${win.focused ? 'rgba(88,166,255,0.15)' : 'rgba(48,54,61,0.5)'}`,
           display: 'flex',
           alignItems: 'center',
-          padding: '0 8px',
+          padding: '0 10px',
           cursor: 'move',
           userSelect: 'none',
+          gap: 8,
         }}
       >
-        <span style={{ flex: 1, fontSize: 12, color: '#aaa', marginLeft: 8 }}>{win.title}</span>
-        <button onClick={onMinimize} style={btnStyle} title="Minimize"><Minimize2 size={12} /></button>
-        <button onClick={onMaximize} style={btnStyle} title={win.maximized ? 'Restore' : 'Maximize'}>{win.maximized ? <Maximize2 size={12} style={{ transform: 'rotate(180deg)' }} /> : <Maximize2 size={12} />}</button>
-        <button onClick={onClose} style={{ ...btnStyle, color: '#f44' }}><X size={12} /></button>
+        {/* Traffic lights */}
+        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+          <button
+            onClick={(e) => { e.stopPropagation(); onClose(); }}
+            style={trafficLight('#f85149')}
+            title="Close"
+            aria-label={`Close ${win.title}`}
+          >
+            <X size={8} strokeWidth={2.5} />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onMinimize(); }}
+            style={trafficLight('#d29922')}
+            title="Minimize"
+            aria-label={`Minimize ${win.title}`}
+          >
+            <Minus size={8} strokeWidth={2.5} />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onMaximize(); }}
+            style={trafficLight('#238636')}
+            title={win.maximized ? 'Restore' : 'Maximize'}
+            aria-label={win.maximized ? `Restore ${win.title}` : `Maximize ${win.title}`}
+          >
+            <Maximize2 size={7} strokeWidth={2.5} />
+          </button>
+        </div>
+
+        {/* Title */}
+        <span style={{
+          flex: 1,
+          fontSize: 12,
+          fontWeight: 600,
+          color: win.focused ? '#c9d1d9' : '#6e7681',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          textAlign: 'center',
+          paddingRight: 52,
+        }}>
+          {win.title}
+        </span>
       </div>
+
+      {/* App content */}
       <div style={{ flex: 1, overflow: 'auto', background: '#0d0d1a', color: '#ccc', fontSize: 13 }}>
-        {AppComponent ? <AppComponent /> : <div style={{ padding: 24, color: '#666' }}>App content</div>}
+        {AppComponent ? <AppComponent /> : (
+          <div style={{ padding: 24, color: '#484f58', textAlign: 'center', paddingTop: 40 }}>
+            App not found: <code style={{ color: '#58a6ff', fontSize: 11 }}>{win.app}</code>
+          </div>
+        )}
       </div>
-      <div style={{ position: 'absolute', bottom: 0, right: 0, width: 12, height: 12, cursor: 'nwse-resize' }} onMouseDown={onResizeStart('se')} />
+
+      {/* Resize handle */}
+      {!isMaximized && (
+        <div
+          onMouseDown={handleResizeMouseDown}
+          style={{
+            position: 'absolute',
+            bottom: 0,
+            right: 0,
+            width: 16,
+            height: 16,
+            cursor: 'nwse-resize',
+            zIndex: 1,
+          }}
+        />
+      )}
     </div>
   );
 }
 
-const btnStyle: React.CSSProperties = {
-  background: 'none', border: 'none', color: '#aaa', cursor: 'pointer',
-  width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12,
-};
+function trafficLight(bg: string): React.CSSProperties {
+  return {
+    width: 13,
+    height: 13,
+    borderRadius: '50%',
+    background: bg,
+    border: 'none',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: 'rgba(0,0,0,0.5)',
+    padding: 0,
+    flexShrink: 0,
+  };
+}

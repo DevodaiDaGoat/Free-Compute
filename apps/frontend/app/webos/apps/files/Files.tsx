@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Folder, FileText } from 'lucide-react';
 import { apiFetch, getTokens, getGatewayUrl } from '../../boot/BootSequence';
 
@@ -28,6 +28,27 @@ export default function FilesApp() {
   const [loading, setLoading] = useState(false);
   const [quota, setQuota] = useState({ used: 0, total: 10737418240 });
   const [notification, setNotification] = useState<{type: 'success'|'error', message: string}|null>(null);
+  const notifTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    if (notifTimerRef.current) {
+      clearTimeout(notifTimerRef.current);
+      notifTimerRef.current = null;
+    }
+  }, []);
+
+  // Show a notification and auto-clear it after 3s. Previously notifications
+  // stayed on-screen forever until the next upload/delete overwrote them.
+  const showNotification = useCallback((n: {type: 'success'|'error', message: string}) => {
+    if (!mountedRef.current) return;
+    setNotification(n);
+    if (notifTimerRef.current) clearTimeout(notifTimerRef.current);
+    notifTimerRef.current = setTimeout(() => {
+      if (mountedRef.current) setNotification(null);
+    }, 3000);
+  }, []);
 
   const listFiles = useCallback(async (path: string) => {
     setLoading(true);
@@ -57,25 +78,40 @@ export default function FilesApp() {
         const text = await resp.text().catch(() => 'unknown');
         throw new Error(`Upload failed (${resp.status}): ${text}`);
       }
-      setNotification({ type: 'success', message: 'Uploaded' });
+      showNotification({ type: 'success', message: 'Uploaded' });
       listFiles(currentPath);
+      // Refetch the profile so the storage-usage bar reflects the new upload.
+      // Previously it stayed at the mount-time value forever, making users
+      // think their upload didn't consume quota. Guard with mountedRef so
+      // setQuota doesn't fire after unmount if the user closed the window
+      // during the upload.
+      apiFetch('/auth/profile')
+        .then((p) => { if (mountedRef.current) setQuota({ used: p.storageUsed, total: p.storageQuota }); })
+        .catch(() => { /* ignore — the file list refresh is the primary UX signal */ });
     } catch (e: any) {
-      setNotification({ type: 'error', message: e.message || 'Upload failed' });
+      showNotification({ type: 'error', message: e.message || 'Upload failed' });
     } finally {
       setLoading(false);
     }
-  }, [currentPath, listFiles]);
+  }, [currentPath, listFiles, showNotification]);
 
   const deleteFile = useCallback(async (filePath: string) => {
     try {
       const params = new URLSearchParams({ path: filePath });
       await apiFetch(`/storage/delete?${params}`, { method: 'DELETE' });
       listFiles(currentPath);
-    } catch (err) {
-      console.error('delete error:', err);
+      // Refetch profile so the usage bar shrinks after a delete. Guard against
+      // unmount so setQuota doesn't fire on a torn-down component.
+      apiFetch('/auth/profile')
+        .then((p) => { if (mountedRef.current) setQuota({ used: p.storageUsed, total: p.storageQuota }); })
+        .catch(() => { /* ignore */ });
+      showNotification({ type: 'success', message: 'Deleted' });
+    } catch (err: any) {
+      showNotification({ type: 'error', message: err?.message || 'Delete failed' });
     }
-  }, [currentPath, listFiles]);
+  }, [currentPath, listFiles, showNotification]);
 
+  // Fetch the profile+quota once on mount.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -89,16 +125,17 @@ export default function FilesApp() {
           setQuota({ used: 0, total: 10737418240 });
         }
       }
-      try {
-        await listFiles('');
-      } catch {
-        if (!cancelled) {
-          setFiles([]);
-        }
-      }
     })();
     return () => { cancelled = true; };
-  }, [listFiles]);
+  }, []);
+
+  // Refetch the file list every time the user navigates into a new folder.
+  // Previously listFiles('') ran once with an empty path so clicking a folder
+  // updated currentPath but the file view never refreshed with the new
+  // folder's contents.
+  useEffect(() => {
+    listFiles(currentPath).catch(() => {});
+  }, [currentPath, listFiles]);
 
   const storagePercent = quota.total > 0 ? (quota.used / quota.total) * 100 : 0;
 
@@ -111,7 +148,14 @@ export default function FilesApp() {
         <div style={{ flex: 1 }} />
         <label style={{ padding: '4px 12px', background: '#238636', color: '#fff', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
           Upload
-          <input type="file" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadFile('', f); }} />
+          <input type="file" hidden onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (!f) return;
+            const target = currentPath ? `${currentPath}/${f.name}` : f.name;
+            uploadFile(target, f);
+            // Clear the input value so uploading the same file again fires onChange.
+            e.target.value = '';
+          }} />
         </label>
         {notification && (
           <div style={{

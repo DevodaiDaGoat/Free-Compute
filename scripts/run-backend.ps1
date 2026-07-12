@@ -53,15 +53,14 @@ $VMSETUP_BIN = Join-Path $TEMPDIR "freecompute-vm-setup.exe"
 
 Write-Host "[1] Building gateway..."
 Set-Location (Join-Path $ROOT "apps/gateway")
-go build -a -buildvcs=false -o $GATEWAY_BIN ./cmd/gateway
+go build -buildvcs=false -o $GATEWAY_BIN ./cmd/gateway
 
 Write-Host "[2] Building host-agent..."
 Set-Location (Join-Path $ROOT "host-agent")
-go build -a -buildvcs=false -o $HOSTAGENT_BIN ./cmd/host-agent
+go build -buildvcs=false -o $HOSTAGENT_BIN ./cmd/host-agent
 
 Write-Host "[3] Building vm-setup..."
-Set-Location (Join-Path $ROOT "host-agent")
-go build -a -buildvcs=false -o $VMSETUP_BIN ./cmd/vm-setup
+go build -buildvcs=false -o $VMSETUP_BIN ./cmd/vm-setup
 
 Write-Host "  Checking port 8080..."
 $existing = Get-NetTCPConnection -LocalPort 8080 -ErrorAction SilentlyContinue

@@ -4,6 +4,22 @@ const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || 'http://localhost:808
 const DEFAULT_TIMEOUT = 10_000;
 const PREWARM_KEEPALIVE_MS = 120_000;
 
+// Best-effort JWT lookup. sessionStorage is set by BootSequence on login;
+// falling back to the module-scoped currentTokens would create a circular
+// import between webos/system/api/websocket → webos/boot/BootSequence. Any
+// caller can override via the opts.headers['Authorization'] path.
+function getStoredAccessToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem('freecompute:tokens');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return typeof parsed?.accessToken === 'string' ? parsed.accessToken : null;
+  } catch {
+    return null;
+  }
+}
+
 const warmupPool = new Map<string, WebSocket>();
 let warmupTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -29,13 +45,21 @@ async function gatewayFetch<T>(url: string, opts: RequestInit = {}): Promise<T> 
 
   const signal = opts.signal ? anySignal(opts.signal, controller.signal) : controller.signal;
 
+  // Attach Authorization if the caller didn't pass one — otherwise gateway
+  // routes wrapped in AuthMiddleware treat the request as anonymous and the
+  // resulting session/tunnel state isn't attributed to the user.
+  const callerHeaders = (opts.headers as Record<string, string>) || {};
+  const hasAuth = Object.keys(callerHeaders).some((k) => k.toLowerCase() === 'authorization');
+  const token = hasAuth ? null : getStoredAccessToken();
+
   try {
     const resp = await fetch(url, {
       ...opts,
       signal,
       headers: {
         'Accept': 'application/json',
-        ...(opts.headers as Record<string, string>),
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        ...callerHeaders,
       },
     });
     if (!resp.ok) throw new GatewayError(resp.status, `Gateway ${resp.status}: ${resp.statusText}`);

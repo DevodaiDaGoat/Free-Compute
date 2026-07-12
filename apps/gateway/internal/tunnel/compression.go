@@ -1,11 +1,13 @@
 package tunnel
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -79,6 +81,18 @@ func (c *compressionWriter) close() error {
 
 func (c *compressionWriter) Unwrap() http.ResponseWriter {
 	return c.ResponseWriter
+}
+
+// Hijack delegates to the underlying ResponseWriter so WebSocket / raw-conn
+// upgrades still work when compression is enabled. Without this, gorilla
+// websocket's upgrade path fails with
+// "websocket: response does not implement http.Hijacker".
+func (c *compressionWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := c.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer does not support hijacking")
+	}
+	return h.Hijack()
 }
 
 type compressionMiddleware struct {
@@ -264,27 +278,22 @@ func (sw *scanningWriter) Write(p []byte) (int, error) {
 
 func (sw *scanningWriter) commit(data []byte, encoding string, contentType string) {
 	sw.buffer = nil
+	// Header() returns the same map each call. Iterating it and calling Add on
+	// itself duplicated every header on every commit (Cache-Control repeated
+	// N times, Set-Cookie appended, etc.). Headers already set on the wrapper
+	// pass through to the underlying ResponseWriter — no copy is needed.
+	h := sw.ResponseWriter.Header()
+	// Content-Length is stale once we potentially compressed the body.
+	h.Del("Content-Length")
 	if len(data) >= brotliMinSize && IsCompressible(contentType) && encoding != "" {
 		compressed, err := CompressBytes(data, encoding)
 		if err == nil && DetectCompressionSavings(data, compressed) > 10 {
-			for k, v := range sw.ResponseWriter.Header() {
-				for _, vv := range v {
-					sw.ResponseWriter.Header().Add(k, vv)
-				}
-			}
-			sw.ResponseWriter.Header().Set("Content-Encoding", encoding)
-			sw.ResponseWriter.Header().Set("Content-Length", "")
+			h.Set("Content-Encoding", encoding)
 			sw.ResponseWriter.WriteHeader(http.StatusOK)
 			_, _ = sw.ResponseWriter.Write(compressed)
 			return
 		}
 	}
-	for k, v := range sw.ResponseWriter.Header() {
-		for _, vv := range v {
-			sw.ResponseWriter.Header().Add(k, vv)
-		}
-	}
-	sw.ResponseWriter.Header().Set("Content-Length", "")
 	sw.ResponseWriter.WriteHeader(http.StatusOK)
 	_, _ = sw.ResponseWriter.Write(data)
 }

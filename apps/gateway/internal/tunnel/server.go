@@ -2,12 +2,12 @@ package tunnel
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
-
-	"golang.org/x/net/http2"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/http2"
 
 	"github.com/freecompute/free-compute/apps/gateway/internal/browsing"
 	"github.com/freecompute/free-compute/apps/gateway/internal/webrtc"
@@ -88,6 +90,7 @@ type Server struct {
 	userTailscaleMu  sync.RWMutex
 
 	signalStore     *signalStore
+	sigStoreCancel  context.CancelFunc
 	metrics         *monitoring.Metrics
 	healthChecker   *monitoring.HealthChecker
 	collector       *monitoring.Collector
@@ -109,7 +112,7 @@ type Server struct {
 
 	rateLimiter *ratelimit.Limiter
 
-	userConns   sync.Map // userID -> int32 (active connections)
+	userConns   map[string]int32 // userID -> active connections, guarded by userConnsMu
 	userConnsMu sync.Mutex
 }
 
@@ -193,7 +196,10 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	hostAllocator := session.NewHostAllocator(logger)
 
 	sigStore := &signalStore{rooms: map[string]*signalRoom{}}
-	go sigStore.sweepLoop()
+	// Sweeper is bound to the server's shutdown so it doesn't leak the
+	// goroutine when the process is stopped in tests or graceful shutdown.
+	sigStoreCtx, sigStoreCancel := context.WithCancel(context.Background())
+	go sigStore.sweepLoop(sigStoreCtx)
 
 	SetTCPCCAlgo(cfg.TCPCCAlgo)
 	SetTCPBufferSize(cfg.TCPBufferSize)
@@ -237,6 +243,7 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 		tailscaleHosts:    make(map[string]*TailscaleHost),
 		userTailscaleIPs:  make(map[string]*UserTailscaleIP),
 		signalStore:       sigStore,
+		sigStoreCancel:    sigStoreCancel,
 		relayMesh:         relayMesh,
 		metrics:           metrics,
 		healthChecker:     healthChecker,
@@ -277,24 +284,59 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	mux.Handle("/ws/", server.rateLimitByIPAndUser(http.HandlerFunc(server.handleWebSocketTunnel)))
 	mux.HandleFunc("/agent/", server.handleAgentTunnel)
 	mux.HandleFunc("/signal/", server.webrtcServer.HandleSignal)
-	mux.HandleFunc("/webrtc/", server.handleWebRTC)
-	mux.HandleFunc("/sessions", server.handleListSessions)
-	mux.HandleFunc("/sessions/", server.handleSessions)
-	mux.HandleFunc("/input/", server.handleInput)
-	mux.HandleFunc("/audio/", server.handleAudio)
-	mux.HandleFunc("/transfer/", server.handleTransfer)
-	mux.HandleFunc("/clipboard/", server.handleClipboard)
-	mux.HandleFunc("/gaming/", server.handleGaming)
-	mux.HandleFunc("/media/", server.handleMediaIngest)
-	mux.HandleFunc("/data/", server.handleDataIngest)
-	mux.HandleFunc("/keyframe/", server.handleRequestKeyframe)
-	mux.HandleFunc("/tailscale/register", server.handleTailscaleRegister)
-	mux.HandleFunc("/tailscale/hosts", server.handleTailscaleHosts)
-	mux.HandleFunc("/tailscale/user", server.handleUserTailscale)
-	mux.HandleFunc("/tailscale/proxy", server.handleTailscaleProxy)
+	// /webrtc/ POST creates a peer connection + burns one of the 1000 concurrent
+	// session slots. Left anonymous, a script can exhaust the pool and DoS
+	// legitimate users. Use AuthMiddleware (not RequireAuth) so anon demos still
+	// work but the handler can attribute anonymous sessions to a stable
+	// per-caller ID (see handleCreateWebRTCSession).
+	mux.Handle("/webrtc/", server.rateLimitByIPAndUser(auth.AuthMiddleware(authMgr, server.handleWebRTC)))
+	// Accept both "/sessions" and "/sessions/" for GET (list) and POST (create)
+	// so callers don't need to guess whether the trailing slash matters. GET
+	// with a resource id (e.g. /sessions/{id}) is dispatched by handleSessions.
+	sessionsRoot := func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			server.handleListSessions(w, r)
+		case http.MethodPost:
+			server.handleCreateSession(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+	// AuthMiddleware populates user context if a valid token is present but
+	// still permits anonymous callers (needed for the demo-mode POST that
+	// creates a session without a login). handleGetSession / handleEndSession
+	// enforce ownership internally.
+	mux.HandleFunc("/sessions", auth.AuthMiddleware(authMgr, sessionsRoot))
+	mux.HandleFunc("/sessions/", auth.AuthMiddleware(authMgr, server.handleSessions))
+	mux.HandleFunc("/input/", server.requireSessionOwner("/input/", server.handleInput))
+	mux.HandleFunc("/audio/", server.requireSessionOwner("/audio/", server.handleAudio))
+	mux.HandleFunc("/transfer/", auth.RequireAuth(authMgr, server.handleTransfer))
+	mux.HandleFunc("/clipboard/", server.requireSessionOwner("/clipboard/", server.handleClipboard))
+	mux.HandleFunc("/gaming/", server.requireSessionOwner("/gaming/", server.handleGaming))
+	mux.HandleFunc("/media/", server.requireSessionIngest("/media/", server.handleMediaIngest))
+	mux.HandleFunc("/data/", server.requireSessionIngest("/data/", server.handleDataIngest))
+	mux.HandleFunc("/keyframe/", server.requireSessionOwner("/keyframe/", server.handleRequestKeyframe))
+	// /tailscale/register was previously anonymous — any caller could inject a
+	// fake TailscaleHost record that dialViaTailscale would then attempt to dial
+	// (a targeted SSRF pointing at gateway-reachable networks). The endpoint is
+	// intended for the host-agent to announce itself, so gate it behind the
+	// shared tunnel token or admin auth. handleHostRegister uses the same
+	// mechanism.
+	mux.HandleFunc("/tailscale/register", server.requireTunnelToken(server.handleTailscaleRegister))
+	// /tailscale/hosts leaks the full peer list to any anonymous caller (info
+	// disclosure — every registered VM name, Tailscale IP, and VM inventory).
+	// Require auth so only logged-in users see the mesh.
+	mux.HandleFunc("/tailscale/hosts", auth.RequireAuth(authMgr, server.handleTailscaleHosts))
+	mux.HandleFunc("/tailscale/user", auth.RequireAuth(authMgr, server.handleUserTailscale))
+	// /tailscale/proxy composes proxy configuration for an arbitrary target
+	// IP:port. Anonymous callers could probe internal ranges via the "wsUrl"
+	// echo. Auth-gate it; the tunnel token is also honored so host-agents can
+	// still request proxy metadata.
+	mux.HandleFunc("/tailscale/proxy", server.requireTunnelToken(server.handleTailscaleProxy))
 	mux.HandleFunc("/hosts/", server.handleHosts)
-	mux.HandleFunc("/hosts/register", server.handleHostRegister)
-	mux.HandleFunc("/hosts/metrics", server.handleHostMetrics)
+	mux.HandleFunc("/hosts/register", server.requireTunnelToken(server.handleHostRegister))
+	mux.HandleFunc("/hosts/metrics", server.requireTunnelToken(server.handleHostMetrics))
 
 	// Admin routes
 	adminWrap := func(h http.HandlerFunc) http.HandlerFunc {
@@ -345,14 +387,21 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	mux.HandleFunc("/health/detail", server.healthChecker.HandleHealthDetailed)
 
 	// VM Image routes
-	mux.HandleFunc("/images", server.imageManager.HandleImages)
-	mux.HandleFunc("/images/", server.imageManager.HandleImageOps)
-	mux.HandleFunc("/snapshots", server.imageManager.HandleSnapshots)
-	mux.HandleFunc("/snapshots/", server.imageManager.HandleSnapshotOps)
+	// /images was previously unauthenticated — any caller could DELETE via
+	// ?userId=admin. HandleImageOps now derives caller identity from JWT.
+	mux.HandleFunc("/images", auth.RequireAuth(authMgr, server.imageManager.HandleImages))
+	mux.HandleFunc("/images/", auth.RequireAuth(authMgr, server.imageManager.HandleImageOps))
+	// Snapshots were previously anonymous — any caller could list a VM's
+	// snapshots by ID (info leak) or DELETE arbitrary snapshots. Require
+	// auth; the handlers themselves still need to enforce ownership on
+	// DELETE, but at minimum an unauthenticated caller can no longer poke
+	// the endpoint.
+	mux.HandleFunc("/snapshots", auth.RequireAuth(authMgr, server.imageManager.HandleSnapshots))
+	mux.HandleFunc("/snapshots/", auth.RequireAuth(authMgr, server.imageManager.HandleSnapshotOps))
 
-	// SSH Key routes
-	mux.HandleFunc("/keys", server.keyManager.HandleKeys)
-	mux.HandleFunc("/keys/", server.keyManager.HandleKeyOps)
+	// SSH Key routes — RequireAuth; handler enforces IDOR via JWT-derived userID.
+	mux.HandleFunc("/keys", auth.RequireAuth(authMgr, server.keyManager.HandleKeys))
+	mux.HandleFunc("/keys/", auth.RequireAuth(authMgr, server.keyManager.HandleKeyOps))
 
 	// Prewarm / early connection establishment
 	mux.HandleFunc("/prewarm", server.handlePrewarm)
@@ -372,10 +421,23 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	mux.HandleFunc("/firewall/groups", modWrap(server.firewallManager.HandleGroups))
 	mux.HandleFunc("/firewall/assign", modWrap(server.firewallManager.HandleGroupAssign))
 
-	// Usage & quota routes
-	mux.HandleFunc("/usage", auth.RequireAuth(authMgr, server.usageTracker.HandleUsage))
-	mux.HandleFunc("/quota", auth.RequireAuth(authMgr, server.usageTracker.HandleQuota))
-	mux.HandleFunc("/invoice", auth.RequireAuth(authMgr, server.usageTracker.HandleInvoice))
+	// Usage & quota routes — inject authenticated user's own ID to prevent IDOR.
+	usageAuth := func(h http.HandlerFunc) http.HandlerFunc {
+		return auth.RequireAuth(authMgr, func(w http.ResponseWriter, r *http.Request) {
+			user := auth.UserFromContext(r)
+			if user == nil {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			q := r.URL.Query()
+			q.Set("userId", user.ID)
+			r.URL.RawQuery = q.Encode()
+			h(w, r)
+		})
+	}
+	mux.HandleFunc("/usage", usageAuth(server.usageTracker.HandleUsage))
+	mux.HandleFunc("/quota", usageAuth(server.usageTracker.HandleQuota))
+	mux.HandleFunc("/invoice", usageAuth(server.usageTracker.HandleInvoice))
 
 	// Storage routes (authenticated)
 	storageAuth := func(h http.HandlerFunc) http.HandlerFunc {
@@ -399,9 +461,22 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	server.healthChecker.ReportHealth("gateway", monitoring.HealthOK, "running", 0)
 	server.healthChecker.ReportHealth("http", monitoring.HealthOK, fmt.Sprintf("listening on %s", cfg.Addr), 0)
 	server.healthChecker.ReportHealth("tunnel", monitoring.HealthOK, fmt.Sprintf("%d routes loaded", len(cfg.Routes)), 0)
+	server.healthChecker.ReportHealth("webrtc", monitoring.HealthOK, "initialized", 0)
+	server.healthChecker.ReportHealth("images", monitoring.HealthOK, "initialized", 0)
+	server.healthChecker.ReportHealth("keys", monitoring.HealthOK, "initialized", 0)
+	server.healthChecker.ReportHealth("firewall", monitoring.HealthOK, "initialized", 0)
+	server.healthChecker.ReportHealth("usage", monitoring.HealthOK, "initialized", 0)
 
 	server.compressMiddleware.SkipPath("/capabilities")
 	server.compressMiddleware.SkipPath("/healthz")
+	// WebSocket / streaming paths must not be wrapped: even with a Hijack
+	// forwarder, the compressed writer would compress the frame stream on
+	// the way out. Skip the whole prefix to be safe.
+	server.compressMiddleware.SkipPrefix("/signal/")
+	server.compressMiddleware.SkipPrefix("/ws/")
+	server.compressMiddleware.SkipPrefix("/agent/")
+	server.compressMiddleware.SkipPrefix("/connect/")
+	server.compressMiddleware.SkipPrefix("/ssh/")
 	handler := withCommonHeaders(server.compressMiddleware.Handler(mux), cfg)
 	server.httpServer = &http.Server{
 		Addr:              cfg.Addr,
@@ -481,6 +556,12 @@ func (s *Server) Start(ctx context.Context) error {
 		err = shutdownErr
 	}
 	s.proxyTransport.CloseIdleConnections()
+	if s.sigStoreCancel != nil {
+		s.sigStoreCancel()
+	}
+	if s.webrtcServer != nil {
+		s.webrtcServer.Shutdown()
+	}
 
 	wg.Wait()
 	if errors.Is(err, context.Canceled) {
@@ -488,6 +569,101 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	return err
+}
+
+// requireTunnelToken gates host-agent endpoints: accepts the tunnel token
+// (X-FreeCompute-Tunnel-Token header or Bearer), or a logged-in admin user.
+func (s *Server) requireTunnelToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := bearerToken(r.Header.Get("Authorization"))
+		if token == "" {
+			token = r.Header.Get("X-FreeCompute-Tunnel-Token")
+		}
+		if s.cfg.TunnelToken != "" {
+			if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.TunnelToken)) == 1 {
+				next(w, r)
+				return
+			}
+		}
+		// Also accept a logged-in admin so the dashboard can query hosts.
+		if user, err := s.authManager.ValidateToken(token); err == nil && auth.RoleLevelOf(user.Role) >= auth.RoleAdmin {
+			next(w, r)
+			return
+		}
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+	}
+}
+
+// sessionOwnerFromPath extracts sessionID from `prefix` (e.g. "/input/"), looks
+// the session up in both the sessionManager and webrtcServer, and returns
+// (ownerUserID, ok). Returns ("", false) if the session doesn't exist.
+func (s *Server) sessionOwnerFromPath(path, prefix string) (string, bool) {
+	sessionID := extractResourceID(path, prefix)
+	if sessionID == "" {
+		return "", false
+	}
+	if sess, err := s.sessionManager.GetSession(sessionID); err == nil && sess != nil {
+		return sess.UserID, true
+	}
+	if sess, err := s.webrtcServer.GetSession(sessionID); err == nil && sess != nil {
+		return sess.ClientID, true
+	}
+	return "", false
+}
+
+// requireSessionOwner enforces JWT auth + verifies the caller owns the session
+// referenced by URL path prefix (e.g. "/input/"). Admins bypass ownership.
+// If sessionID is missing or the session doesn't exist we return 404.
+func (s *Server) requireSessionOwner(prefix string, next http.HandlerFunc) http.HandlerFunc {
+	return auth.RequireAuth(s.authManager, func(w http.ResponseWriter, r *http.Request) {
+		user := auth.UserFromContext(r)
+		if user == nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		ownerID, ok := s.sessionOwnerFromPath(r.URL.Path, prefix)
+		if !ok {
+			http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+			return
+		}
+		if ownerID != user.ID && auth.RoleLevelOf(user.Role) < auth.RoleAdmin {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	})
+}
+
+// requireSessionIngest gates the host-agent → gateway ingest endpoints
+// (/media/, /data/, /keyframe/). Accepts either the tunnel token (host agents)
+// or a caller who owns the referenced session (admin bypass ownership).
+func (s *Server) requireSessionIngest(prefix string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := bearerToken(r.Header.Get("Authorization"))
+		if token == "" {
+			token = r.Header.Get("X-FreeCompute-Tunnel-Token")
+		}
+		if s.cfg.TunnelToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.TunnelToken)) == 1 {
+			next(w, r)
+			return
+		}
+		user, err := s.authManager.ValidateToken(token)
+		if err != nil || user == nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		ownerID, ok := s.sessionOwnerFromPath(r.URL.Path, prefix)
+		if !ok {
+			http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+			return
+		}
+		if ownerID != user.ID && auth.RoleLevelOf(user.Role) < auth.RoleAdmin {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+		// Stash the user so handlers can pick up identity when needed.
+		next(w, r.WithContext(auth.WithUser(r.Context(), user)))
+	}
 }
 
 func (s *Server) rateLimitByIP(next http.Handler) http.Handler {
@@ -566,11 +742,14 @@ func (s *Server) incrementUserConns(userID string) bool {
 	}
 	s.userConnsMu.Lock()
 	defer s.userConnsMu.Unlock()
-	current, _ := s.userConns.LoadOrStore(userID, int32(0))
-	if current.(int32) >= int32(s.cfg.MaxConnsPerUser) {
+	if s.userConns == nil {
+		s.userConns = make(map[string]int32)
+	}
+	current := s.userConns[userID]
+	if current >= int32(s.cfg.MaxConnsPerUser) {
 		return false
 	}
-	s.userConns.Store(userID, current.(int32)+1)
+	s.userConns[userID] = current + 1
 	return true
 }
 
@@ -580,13 +759,18 @@ func (s *Server) decrementUserConns(userID string) {
 	}
 	s.userConnsMu.Lock()
 	defer s.userConnsMu.Unlock()
-	if current, ok := s.userConns.Load(userID); ok {
-		newVal := current.(int32) - 1
-		if newVal <= 0 {
-			s.userConns.Delete(userID)
-		} else {
-			s.userConns.Store(userID, newVal)
-		}
+	if s.userConns == nil {
+		return
+	}
+	current, ok := s.userConns[userID]
+	if !ok {
+		return
+	}
+	newVal := current - 1
+	if newVal <= 0 {
+		delete(s.userConns, userID)
+	} else {
+		s.userConns[userID] = newVal
 	}
 }
 
@@ -597,18 +781,51 @@ func (s *Server) writeConnLimitReached(w http.ResponseWriter, routeID string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": "too many connections for user"})
 }
 
+// resolveAllowedOrigin checks the request origin against a safe allowlist.
+// Returns the origin to echo back, or empty string to deny.
+func resolveAllowedOrigin(origin string, cfg Config) string {
+	if origin == "" {
+		return ""
+	}
+	// Localhost always allowed (dev).
+	if strings.HasPrefix(origin, "http://localhost:") ||
+		strings.HasPrefix(origin, "http://127.0.0.1:") ||
+		strings.HasPrefix(origin, "https://localhost:") {
+		return origin
+	}
+	// Allow the configured CDN / edge / API hostnames.
+	allowedHosts := []string{cfg.CDNHostname, cfg.EdgeHostname, cfg.APIHostname}
+	for _, host := range allowedHosts {
+		if host == "" {
+			continue
+		}
+		if origin == "https://"+host || origin == "http://"+host {
+			return origin
+		}
+		// Subdomain match.
+		if strings.HasSuffix(origin, "."+host) {
+			return origin
+		}
+	}
+	return ""
+}
+
 func withCommonHeaders(next http.Handler, cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 
-		if cfg.CDNHostname != "" {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-FreeCompute-Tunnel-Token")
-			w.Header().Set("Access-Control-Max-Age", "86400")
+		origin := r.Header.Get("Origin")
+		allowedOrigin := resolveAllowedOrigin(origin, cfg)
+		if allowedOrigin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
 		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-FreeCompute-Tunnel-Token, X-Requested-With")
+		w.Header().Set("Access-Control-Max-Age", "86400")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -791,6 +1008,16 @@ func (s *Server) handleCreateWebRTCSession(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Attribute the session to the JWT-derived user ID so it appears in the
+	// caller's /sessions listing and is subject to per-user rate limits.
+	// Anonymous callers fall through to a stable per-request identifier so
+	// they can't spoof ClientID via the request body.
+	if user := auth.UserFromContext(r); user != nil {
+		req.ClientID = user.ID
+	} else if req.ClientID == "" {
+		req.ClientID = fmt.Sprintf("anon-%x", time.Now().UnixNano())
+	}
+
 	// Set defaults
 	if req.Preset == "" {
 		req.Preset = "safe"
@@ -832,9 +1059,22 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var sessionList []map[string]interface{}
+	// Initialize to an empty slice so the JSON always serializes as [],
+	// never null. The frontend does Array.isArray checks on data.sessions —
+	// null would be treated as "no update" and mask real empty states.
+	sessionList := []map[string]interface{}{}
+
+	// Enforce per-user filtering: unauthenticated callers see nothing;
+	// non-admin users see only sessions they own. Admins see everything.
+	user := auth.UserFromContext(r)
+	isAdmin := user != nil && auth.RoleLevelOf(user.Role) >= auth.RoleAdmin
 
 	for _, sess := range s.sessionManager.ListSessions() {
+		if !isAdmin {
+			if user == nil || sess.UserID != user.ID {
+				continue
+			}
+		}
 		sessionList = append(sessionList, map[string]interface{}{
 			"id":             sess.ID,
 			"state":          sess.State,
@@ -846,7 +1086,26 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	sessionList = append(sessionList, s.webrtcServer.ListSessions()...)
+	for _, entry := range s.webrtcServer.ListSessions() {
+		if !isAdmin {
+			if user == nil {
+				continue
+			}
+			ownerID, _ := entry["clientId"].(string)
+			if ownerID == "" {
+				// Fall back to a direct GetSession lookup for older entries.
+				if id, ok := entry["id"].(string); ok {
+					if sess, err := s.webrtcServer.GetSession(id); err == nil && sess != nil {
+						ownerID = sess.ClientID
+					}
+				}
+			}
+			if ownerID != user.ID {
+				continue
+			}
+		}
+		sessionList = append(sessionList, entry)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{"sessions": sessionList})
 }
@@ -870,8 +1129,69 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Derive UserID from the JWT context if the caller is authenticated.
+	// Otherwise stamp an anonymous ID so single-user demo / unauthenticated
+	// flows don't blow up with "user ID is required" from the session manager.
+	if req.UserID == "" {
+		if u := auth.UserFromContext(r); u != nil {
+			req.UserID = u.ID
+		} else {
+			req.UserID = fmt.Sprintf("anon-%x", time.Now().UnixNano())
+		}
+	}
+
 	resp, err := s.sessionManager.CreateSession(r.Context(), &req)
 	if err != nil {
+		// If host allocation failed (single-node dev or all hosts busy) fall
+		// back to a pure WebRTC session — the browser-facing signaling path
+		// still works without a full host. This keeps the /sessions endpoint
+		// usable in demo installs and matches the "try /sessions then
+		// /webrtc" pattern from the connect page.
+		if strings.Contains(err.Error(), "no available hosts") ||
+			strings.Contains(err.Error(), "no available hosts in region") {
+			s.logger.Printf("session create fell back to webrtc: %v", err)
+			wrtcReq := &webrtc.CreateSessionRequest{
+				ClientID:    req.UserID,
+				VideoCodecs: []string{"h264", "vp8", "vp9"},
+				AudioCodecs: []string{"opus", "aac"},
+				Preset:      string(req.StreamPreset),
+				Resolution: webrtc.Resolution{
+					Width:       uint32(req.RequestedResolution.Width),
+					Height:      uint32(req.RequestedResolution.Height),
+					RefreshRate: uint32(req.RequestedResolution.RefreshRate),
+				},
+				GPURequired: req.GPURequired,
+			}
+			if wrtcReq.Resolution.Width == 0 {
+				wrtcReq.Resolution.Width = 1920
+			}
+			if wrtcReq.Resolution.Height == 0 {
+				wrtcReq.Resolution.Height = 1080
+			}
+			wResp, wErr := s.webrtcServer.CreateSession(wrtcReq)
+			if wErr != nil {
+				s.logger.Printf("webrtc fallback also failed: %v", wErr)
+				http.Error(w, wErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			// Adapt the webrtc response to the shape the frontend expects
+			// (either `session.id` or `sessionId` — RemoteDesktop.tsx handles
+			// both — plus `signalingUrl`).
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"session": map[string]any{
+					"id":    wResp.SessionID,
+					"state": "connecting",
+				},
+				"sessionId":    wResp.SessionID,
+				"signalingUrl": wResp.SignalingURL,
+				"turnServers":  wResp.TURNServers,
+				"stunServers":  wResp.STUNServers,
+				"videoCodec":   wResp.VideoCodec,
+				"audioCodec":   wResp.AudioCodec,
+				"expiresAt":    wResp.ExpiresAt,
+			})
+			return
+		}
 		s.logger.Printf("failed to create session: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -893,6 +1213,13 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Ownership: non-admin callers only see their own sessions.
+	user := auth.UserFromContext(r)
+	if user == nil || (sess.UserID != user.ID && auth.RoleLevelOf(user.Role) < auth.RoleAdmin) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, sess)
 }
 
@@ -906,17 +1233,40 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
+	// Body is optional on DELETE — treat empty/no-body as "user-requested".
+	// Reject only malformed non-empty bodies.
+	if r.ContentLength > 0 || r.Header.Get("Content-Type") != "" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
 	}
 
 	if req.Reason == "" {
 		req.Reason = "user-requested"
 	}
 
-	if err := s.sessionManager.EndSession(sessionID, req.Reason); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// Ownership: only the session's owner (or admin) may end it. Non-owners
+	// used to be able to DELETE any session by ID.
+	user := auth.UserFromContext(r)
+	ownerID, found := s.sessionOwnerFromPath(r.URL.Path, "/sessions/")
+	if !found {
+		http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+		return
+	}
+	if user == nil || (ownerID != user.ID && auth.RoleLevelOf(user.Role) < auth.RoleAdmin) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+
+	// Try the session manager first, then fall through to the webrtc-only
+	// path — a session created via the /sessions webrtc-fallback lives in
+	// the webrtc server, not the session manager. Either succeeding means
+	// the client's disconnect landed.
+	sessionErr := s.sessionManager.EndSession(sessionID, req.Reason)
+	webrtcErr := s.webrtcServer.EndSession(sessionID, req.Reason)
+	if sessionErr != nil && webrtcErr != nil {
+		http.Error(w, sessionErr.Error(), http.StatusNotFound)
 		return
 	}
 
@@ -1006,6 +1356,28 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
+	}
+
+	// Ownership check on the referenced session (body-supplied SessionID).
+	user := auth.UserFromContext(r)
+	if user == nil {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	if req.SessionID != "" {
+		var ownerID string
+		if sess, err := s.sessionManager.GetSession(req.SessionID); err == nil && sess != nil {
+			ownerID = sess.UserID
+		} else if wsess, err := s.webrtcServer.GetSession(req.SessionID); err == nil && wsess != nil {
+			ownerID = wsess.ClientID
+		} else {
+			http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+			return
+		}
+		if ownerID != user.ID && auth.RoleLevelOf(user.Role) < auth.RoleAdmin {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
 	}
 
 	transfer, err := s.transferManager.CreateTransfer(
@@ -1327,8 +1699,21 @@ func (s *Server) handleTailscaleHosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"hosts": hosts})
 }
 
-// Per-user Tailscale IP allocation
+// Per-user Tailscale IP allocation.
+//
+// This endpoint is wrapped in RequireAuth (see mux registration) so the
+// authenticated caller's identity is always available via UserFromContext.
+// The GET path returns only the caller's own entry — it never lists other
+// users' Tailscale mappings, and admin listing is not exposed here.
+// The POST path forces UserID from the JWT to prevent IDOR.
 func (s *Server) handleUserTailscale(w http.ResponseWriter, r *http.Request) {
+	callerUser := auth.UserFromContext(r)
+	if callerUser == nil {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	callerRole := auth.RoleLevelOf(callerUser.Role)
+
 	switch r.Method {
 	case http.MethodPost:
 		var req struct {
@@ -1341,8 +1726,12 @@ func (s *Server) handleUserTailscale(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		if req.UserID == "" || req.TailscaleIP == "" {
-			http.Error(w, "userId and tailscaleIp required", http.StatusBadRequest)
+		// Force UserID to caller unless admin is explicitly setting for someone else.
+		if callerRole < auth.RoleAdmin || req.UserID == "" {
+			req.UserID = callerUser.ID
+		}
+		if req.TailscaleIP == "" {
+			http.Error(w, "tailscaleIp required", http.StatusBadRequest)
 			return
 		}
 		if req.ProxyMode == "" {
@@ -1362,30 +1751,31 @@ func (s *Server) handleUserTailscale(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "mapped"})
 
 	case http.MethodGet:
-		userID := r.URL.Query().Get("userId")
-		s.userTailscaleMu.RLock()
-		if userID != "" {
-			if entry, ok := s.userTailscaleIPs[userID]; ok {
-				s.userTailscaleMu.RUnlock()
-				writeJSON(w, http.StatusOK, entry)
-				return
+		// Non-admin: always return caller's own entry regardless of query params.
+		// Admin: may lookup a specific userId (still per-user, not a list).
+		targetID := callerUser.ID
+		if callerRole >= auth.RoleAdmin {
+			if q := r.URL.Query().Get("userId"); q != "" {
+				targetID = q
 			}
-			s.userTailscaleMu.RUnlock()
-			http.Error(w, "user not found", http.StatusNotFound)
+		}
+
+		s.userTailscaleMu.RLock()
+		entry, ok := s.userTailscaleIPs[targetID]
+		s.userTailscaleMu.RUnlock()
+		if !ok {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 			return
 		}
-		entries := make([]*UserTailscaleIP, 0, len(s.userTailscaleIPs))
-		s.userTailscaleMu.RUnlock()
-		s.userTailscaleMu.Lock()
-		for key, e := range s.userTailscaleIPs {
-			if time.Since(e.ExpiresAt) < 0 {
-				entries = append(entries, e)
-			} else {
-				delete(s.userTailscaleIPs, key)
-			}
+		// Filter out expired entries.
+		if time.Now().After(entry.ExpiresAt) {
+			s.userTailscaleMu.Lock()
+			delete(s.userTailscaleIPs, targetID)
+			s.userTailscaleMu.Unlock()
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
 		}
-		s.userTailscaleMu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{"users": entries})
+		writeJSON(w, http.StatusOK, entry)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1493,7 +1883,7 @@ func (s *Server) handleHostMetrics(w http.ResponseWriter, r *http.Request) {
 	network := networkTx + networkRx
 
 	if s.securityDetector != nil {
-		s.securityDetector.AnalyzeMetrics(vmID, cpuUsage, gpuUsage, network, 0)
+		s.securityDetector.AnalyzeMetrics(vmID, cpuUsage, gpuUsage, network, activeStreams)
 	}
 
 	if s.db != nil && vmID != "" {
@@ -1566,17 +1956,32 @@ func (s *Server) dialViaTailscale(ctx context.Context, route *Route) (net.Conn, 
 	}
 
 	var firstErr error
+	drainRemaining := func(remaining int) {
+		if remaining <= 0 {
+			return
+		}
+		go func() {
+			for j := 0; j < remaining; j++ {
+				r := <-ch
+				if r.conn != nil {
+					_ = r.conn.Close()
+				}
+			}
+		}()
+	}
 	for i := 0; i < len(hosts); i++ {
 		select {
 		case r := <-ch:
 			if r.err == nil {
 				s.logger.Printf("tailscale direct route=%s via %s", route.ID, r.conn.RemoteAddr())
+				drainRemaining(len(hosts) - i - 1)
 				return r.conn, nil
 			}
 			if firstErr == nil {
 				firstErr = r.err
 			}
 		case <-ctx.Done():
+			drainRemaining(len(hosts) - i)
 			return nil, ctx.Err()
 		}
 	}

@@ -34,6 +34,7 @@ function time() {
 }
 
 const stateColor: Record<SessionState, string> = {
+  created: '#8b949e',
   queued: '#a96800',
   provisioning: '#246bfe',
   connecting: '#246bfe',
@@ -92,6 +93,12 @@ function StreamViewer({ session, turnServers, onLog, onClose }: StreamViewerProp
   const cleanupRef = useRef<(() => void) | null>(null);
 
   const [status, setStatus] = useState<StreamStatus>('idle');
+  const statusRef = useRef<StreamStatus>('idle');
+
+  const updateStatus = (s: StreamStatus) => {
+    statusRef.current = s;
+    setStatus(s);
+  };
   const [streamError, setStreamError] = useState('');
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
 
@@ -137,7 +144,7 @@ function StreamViewer({ session, turnServers, onLog, onClose }: StreamViewerProp
     if (!session.signalingUrl) return;
 
     let cancelled = false;
-    setStatus('connecting');
+    updateStatus('connecting');
     setStreamError('');
     onLog(`Stream: opening WebSocket → ${buildSignalUrl(session.signalingUrl)}`);
 
@@ -163,9 +170,9 @@ function StreamViewer({ session, turnServers, onLog, onClose }: StreamViewerProp
       pc.onconnectionstatechange = () => {
         if (cancelled) return;
         onLog(`Stream: pc state → ${pc.connectionState}`);
-        if (pc.connectionState === 'connected') setStatus('connected');
+        if (pc.connectionState === 'connected') updateStatus('connected');
         else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-          setStatus('failed');
+          updateStatus('failed');
           setStreamError(`PeerConnection ${pc.connectionState}`);
         }
       };
@@ -173,23 +180,33 @@ function StreamViewer({ session, turnServers, onLog, onClose }: StreamViewerProp
       pc.ontrack = (ev) => {
         if (cancelled) return;
         onLog(`Stream: received ${ev.track.kind} track`);
-    let stream = ev.streams[0];
-    if (!stream) {
-        stream = new MediaStream();
-        stream.addTrack(ev.track);
-    }
-    setRemoteStream(stream);
-    if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play().catch((err) => onLog(`Stream: autoplay blocked: ${err.message}`));
-    }
+        let stream = ev.streams[0];
+        if (!stream) {
+          stream = new MediaStream();
+          stream.addTrack(ev.track);
+        }
+        // Only attach the stream once — repeated srcObject assignments abort
+        // any in-flight play() promise and log "play() interrupted by a new
+        // load request". Subsequent tracks are merged into the same stream by
+        // the browser, so no re-attach is needed.
+        if (videoRef.current && videoRef.current.srcObject !== stream) {
+          setRemoteStream(stream);
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch((err) => {
+            if (err && err.name !== 'AbortError') {
+              onLog(`Stream: autoplay blocked: ${err.message}`);
+            }
+          });
+        } else if (!videoRef.current) {
+          setRemoteStream(stream);
+        }
       };
 
       const dc = pc.createDataChannel('input', { ordered: true });
       dataChannelRef.current = dc;
       dc.onopen = () => onLog(`Stream: input data channel open`);
       dc.onclose = () => onLog(`Stream: input data channel closed`);
-      dc.onerror = (err) => onLog(`Stream: input data channel error`);
+      dc.onerror = () => onLog(`Stream: input data channel error`);
 
       pc.createOffer()
         .then((offer) => pc.setLocalDescription(offer))
@@ -201,7 +218,7 @@ function StreamViewer({ session, turnServers, onLog, onClose }: StreamViewerProp
         })
         .catch((err) => {
           onLog(`Stream: createOffer failed: ${err.message}`);
-          setStatus('failed');
+          updateStatus('failed');
           setStreamError(err.message);
         });
     };
@@ -224,7 +241,7 @@ function StreamViewer({ session, turnServers, onLog, onClose }: StreamViewerProp
             pc.setRemoteDescription(new RTCSessionDescription(parsed.payload))
               .catch((err) => {
                 onLog(`Stream: setRemoteDescription failed: ${err.message}`);
-                setStatus('failed');
+                updateStatus('failed');
                 setStreamError(err.message);
               });
           }
@@ -241,17 +258,17 @@ function StreamViewer({ session, turnServers, onLog, onClose }: StreamViewerProp
       }
     };
 
-    ws.onerror = (ev) => {
+    ws.onerror = () => {
       if (cancelled) return;
       onLog(`Stream: WebSocket error`);
-      setStatus('failed');
+      updateStatus('failed');
       setStreamError('WebSocket signaling error');
     };
 
     ws.onclose = () => {
       if (cancelled) return;
       onLog(`Stream: WebSocket closed`);
-      if (status !== 'failed') setStatus('closed');
+      if (statusRef.current !== 'failed') updateStatus('closed');
     };
 
     cleanupRef.current = () => {
@@ -354,6 +371,13 @@ export default function ConnectPage() {
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState('');
   const [viewId, setViewId] = useState<string | null>(null);
+  // Mirror viewId into a ref so the poll effect below doesn't need it in
+  // deps. Previously the effect depended on viewId, so the moment auto-
+  // discovery set viewId the effect cleanup fired, the in-flight fetch was
+  // aborted and the 3s interval reset — every discovery cost a full poll
+  // cycle of jitter.
+  const viewIdRef = useRef(viewId);
+  useEffect(() => { viewIdRef.current = viewId; }, [viewId]);
 
 
   const addLog = useCallback((msg: string) => {
@@ -414,23 +438,43 @@ export default function ConnectPage() {
   }, [mode, resourceClass, preset, transport, gpuPreferred, gpuRequired, addLog]);
 
   useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
     const interval = setInterval(async () => {
       try {
+        // Attach the JWT so authenticated callers get their own sessions
+        // (server-side filter). Anonymous callers still see the poll return
+        // [] which the merge step below correctly handles by preserving
+        // locally-created sessions.
+        let token: string | null = null;
+        try {
+          const raw = typeof window !== 'undefined' ? window.sessionStorage.getItem('freecompute:tokens') : null;
+          if (raw) token = JSON.parse(raw)?.accessToken || null;
+        } catch { /* ignore */ }
+        const headers: Record<string, string> = { 'Accept': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
         const resp = await fetch(`${getGatewayUrl()}/sessions`, {
-          headers: { 'Accept': 'application/json' },
+          headers,
+          signal: controller.signal,
         });
-        if (!resp.ok) return;
+        if (cancelled || !resp.ok) return;
         const data = await resp.json();
-        if (!Array.isArray(data.sessions)) return;
+        if (cancelled || !Array.isArray(data.sessions)) return;
 
         setSessions((prev) => {
-          const map = new Map(prev.map((s) => [s.id, s]));
-          const next: AppSession[] = [];
+          // Merge, don't replace. Sessions the user just created live in local
+          // state; the poll may not see them (anonymous callers get [] because
+          // /sessions filters by JWT-derived userID). Wiping prev on every
+          // empty poll makes just-created sessions vanish from the UI.
+          const serverIds = new Set<string>();
+          const merged = new Map<string, AppSession>();
+          for (const p of prev) merged.set(p.id, p);
           for (const s of data.sessions) {
             const id = s.id || s.sessionId;
             if (!id) continue;
-            const existing = map.get(id);
-            next.push({
+            serverIds.add(id);
+            const existing = merged.get(id);
+            merged.set(id, {
               id,
               state: (s.state as SessionState) || existing?.state || 'queued',
               mode: s.mode || s.type || existing?.mode || 'desktop',
@@ -442,8 +486,16 @@ export default function ConnectPage() {
               estimatedReady: s.estimatedReady || existing?.estimatedReady,
             });
           }
-          if (next.length === 0) return prev;
-          if (!viewId) {
+          // Retire sessions the server explicitly marks ended/expired/failed —
+          // but keep locally-created sessions that the server hasn't reported
+          // yet (typical for anonymous /connect callers).
+          const next: AppSession[] = [];
+          for (const s of merged.values()) {
+            if (serverIds.has(s.id) || s.state === 'connecting' || s.state === 'active' || s.state === 'created' || s.state === 'queued' || s.state === 'provisioning') {
+              next.push(s);
+            }
+          }
+          if (!viewIdRef.current) {
             const auto = next.find((s) => s.signalingUrl && (s.state === 'active' || s.state === 'connecting' || s.state === 'created'));
             if (auto?.signalingUrl) {
               setViewId(auto.id);
@@ -453,23 +505,43 @@ export default function ConnectPage() {
           return next;
         });
       } catch {
-        // ignore poll errors
+        // ignore poll errors (including aborts)
       }
     }, 3000);
-    return () => clearInterval(interval);
-  }, [getGatewayUrl, addLog, viewId]);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearInterval(interval);
+    };
+    // Deliberately omit viewId — its stable read comes from viewIdRef so the
+    // poll interval isn't torn down and rebuilt every time auto-discovery
+    // sets viewId. Rebuilding wasted a full 3s cycle per state change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addLog]);
 
 
   const disconnect = useCallback(async (id: string) => {
     addLog(`Disconnecting session ${id.slice(0, 8)}...`);
+    // Best-effort DELETE — /sessions/{id} already handles both webrtc-fallback
+    // and session-manager sessions. Attach the JWT so ownership checks on the
+    // gateway match the caller's user ID — without this an authenticated user
+    // creating a session on /webos and closing from /connect would trip a
+    // 403 (owner mismatch) and leave the server-side session orphaned.
     try {
-      await fetch(`${getGatewayUrl()}/sessions/${id}`, { method: 'DELETE' });
-    } catch {
+      let token: string | null = null;
       try {
-        await fetch(`${getGatewayUrl()}/webrtc/${id}`, { method: 'DELETE' });
-      } catch {
-        // ignore backend errors, still clean up locally
-      }
+        const raw = typeof window !== 'undefined' ? window.sessionStorage.getItem('freecompute:tokens') : null;
+        if (raw) token = JSON.parse(raw)?.accessToken || null;
+      } catch { /* ignore */ }
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      await fetch(`${getGatewayUrl()}/sessions/${id}`, {
+        method: 'DELETE',
+        headers,
+        body: JSON.stringify({ reason: 'user-requested' }),
+      });
+    } catch {
+      // Network error — still clean up locally.
     }
     setSessions((prev) => prev.filter((s) => s.id !== id));
     if (viewId === id) setViewId(null);

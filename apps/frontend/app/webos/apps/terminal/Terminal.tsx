@@ -75,18 +75,27 @@ export default function TerminalApp() {
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Only focus on mount. Attaching a window-wide click listener that yanked
+  // focus back to the terminal broke every OTHER app (clicking Browser URL,
+  // Settings inputs, Admin fields, Files upload button, etc. lost focus mid-
+  // keystroke as soon as Terminal was open in another window). The onClick
+  // on the terminal container below still refocuses when the user clicks
+  // inside the terminal itself, which is the desired UX.
   useEffect(() => {
     inputRef.current?.focus();
-    const focus = () => inputRef.current?.focus();
-    window.addEventListener('click', focus);
-    return () => window.removeEventListener('click', focus);
   }, []);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [lines]);
 
-  const username = () => getUser()?.displayName || getTokens()?.accessToken || 'guest';
+  const username = () => {
+    const u = getUser();
+    if (u?.displayName) return u.displayName;
+    if (u?.email) return u.email.split('@')[0];
+    if (u?.id) return u.id.slice(0, 12);
+    return 'guest';
+  };
   const prompt = () => `${username()}@webos:${displayPath(cwd)}$`;
 
   const gateway = useCallback(
@@ -225,8 +234,12 @@ export default function TerminalApp() {
         case 'gateway':
           return gateway(async () => {
             const base = getGatewayUrl();
-            const health = await fetch(`${base}/healthz`).then((r) => r.json());
-            const caps = await fetch(`${base}/capabilities`).then((r) => r.json());
+            const okJson = async (r: Response) => {
+              if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+              return r.json();
+            };
+            const health = await fetch(`${base}/healthz`).then(okJson);
+            const caps = await fetch(`${base}/capabilities`).then(okJson);
             return `Gateway: ${base}\nStatus: ${JSON.stringify(health)}\nProtocols: ${(caps.protocols || []).join(', ') || 'N/A'}\nModes: ${(caps.routeModes || []).join(', ') || 'N/A'}`;
           });
 
@@ -242,7 +255,14 @@ export default function TerminalApp() {
 
         case 'tailscale':
           return gateway(async () => {
-            const hosts = await fetch(`${getGatewayUrl()}/tailscale/hosts`).then((r) => r.json());
+            // Tailscale endpoints are RequireAuth. Missing the bearer token
+            // used to make this silently return 401 which the terminal
+            // surfaced as an unfriendly HTTP error.
+            const r = await fetch(`${getGatewayUrl()}/tailscale/hosts`, {
+              headers: tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : {},
+            });
+            if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+            const hosts = await r.json();
             const list = (hosts.hosts || []).map(
               (h: any) => `  ${h.tailscaleIp} ${h.hostName} (${(h.vms || []).length} VMs)`
             );

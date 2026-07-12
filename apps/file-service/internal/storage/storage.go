@@ -3,6 +3,7 @@ package storage
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,31 @@ import (
 
 	"github.com/freecompute/free-compute/apps/file-service/internal/models"
 )
+
+// MaxUploadSize caps a single upload to 10 GiB. S3Storage.Upload uses this to
+// bound io.ReadAll so a malicious client can't OOM the process.
+const MaxUploadSize int64 = 10 * 1024 * 1024 * 1024
+
+var ErrPathTraversal = errors.New("path traversal detected")
+
+// safeUserPath resolves basePath/userID/filePath and guarantees the result
+// stays inside the user's directory (rejects ../ escapes and absolute paths).
+func safeUserPath(basePath, userID, filePath string) (string, error) {
+	if userID == "" {
+		return "", errors.New("empty userID")
+	}
+	// Reject absolute paths outright — filepath.Join would silently accept them
+	// on some platforms and Clean can't recover the intended prefix.
+	if filepath.IsAbs(filePath) {
+		return "", ErrPathTraversal
+	}
+	root := filepath.Clean(filepath.Join(basePath, userID))
+	full := filepath.Clean(filepath.Join(root, filePath))
+	if full != root && !strings.HasPrefix(full, root+string(os.PathSeparator)) {
+		return "", ErrPathTraversal
+	}
+	return full, nil
+}
 
 type Storage interface {
 	Upload(userID, filePath, mimeType string, reader io.Reader) (*models.FileInfo, error)
@@ -39,7 +65,10 @@ func NewLocalStorage(basePath string) (*LocalStorage, error) {
 }
 
 func (s *LocalStorage) Upload(userID, filePath, mimeType string, reader io.Reader) (*models.FileInfo, error) {
-	fullPath := filepath.Join(s.basePath, userID, filePath)
+	fullPath, err := safeUserPath(s.basePath, userID, filePath)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		return nil, fmt.Errorf("create dir: %w", err)
 	}
@@ -51,7 +80,9 @@ func (s *LocalStorage) Upload(userID, filePath, mimeType string, reader io.Reade
 	defer f.Close()
 
 	hasher := sha256.New()
-	tee := io.TeeReader(reader, hasher)
+	// Cap the copy at MaxUploadSize so a chunked-encoding client can't fill
+	// the disk. The handler layer also wraps r.Body in http.MaxBytesReader.
+	tee := io.TeeReader(io.LimitReader(reader, MaxUploadSize), hasher)
 	written, err := io.Copy(f, tee)
 	if err != nil {
 		os.Remove(fullPath)
@@ -80,7 +111,10 @@ func (s *LocalStorage) Upload(userID, filePath, mimeType string, reader io.Reade
 }
 
 func (s *LocalStorage) Download(userID, filePath string) (io.ReadCloser, *models.FileInfo, error) {
-	fullPath := filepath.Join(s.basePath, userID, filePath)
+	fullPath, err := safeUserPath(s.basePath, userID, filePath)
+	if err != nil {
+		return nil, nil, err
+	}
 	stat, err := os.Stat(fullPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("file not found: %w", err)
@@ -102,7 +136,10 @@ func (s *LocalStorage) Download(userID, filePath string) (io.ReadCloser, *models
 }
 
 func (s *LocalStorage) Delete(userID, filePath string) error {
-	fullPath := filepath.Join(s.basePath, userID, filePath)
+	fullPath, err := safeUserPath(s.basePath, userID, filePath)
+	if err != nil {
+		return err
+	}
 	if err := os.Remove(fullPath); err != nil {
 		return fmt.Errorf("delete file: %w", err)
 	}
@@ -160,7 +197,10 @@ func (s *LocalStorage) List(userID, prefix string, page, pageSize int) ([]*model
 }
 
 func (s *LocalStorage) Info(userID, filePath string) (*models.FileInfo, error) {
-	fullPath := filepath.Join(s.basePath, userID, filePath)
+	fullPath, err := safeUserPath(s.basePath, userID, filePath)
+	if err != nil {
+		return nil, err
+	}
 	stat, err := os.Stat(fullPath)
 	if err != nil {
 		return nil, fmt.Errorf("file not found: %w", err)
@@ -186,50 +226,34 @@ type S3Storage struct {
 
 type s3Client struct{}
 
+// errS3NotImplemented is returned by every S3Storage method. The S3 code path
+// is a scaffold — Upload would previously hash the input and return
+// success without persisting anything, silently discarding user data. Making
+// every method (including construction) return an error keeps deployments
+// from footgunning themselves by setting FREECOMPUTE_FILESERVICE_STORAGE=s3
+// before the S3 client is actually implemented.
+var errS3NotImplemented = fmt.Errorf("S3 storage backend is not yet implemented; set FREECOMPUTE_FILESERVICE_STORAGE=local")
+
 func NewS3Storage(bucket, region, endpoint, accessKey, secretKey string) (*S3Storage, error) {
-	return &S3Storage{
-		bucket:    bucket,
-		region:    region,
-		endpoint:  endpoint,
-		accessKey: accessKey,
-		secretKey: secretKey,
-		client:    &s3Client{},
-	}, nil
+	return nil, errS3NotImplemented
 }
 
 func (s *S3Storage) Upload(userID, filePath, mimeType string, reader io.Reader) (*models.FileInfo, error) {
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, fmt.Errorf("read data: %w", err)
-	}
-
-	checksum := sha256.Sum256(data)
-	now := time.Now()
-	return &models.FileInfo{
-		ID:        fmt.Sprintf("file_%x", now.UnixNano()),
-		Name:      filepath.Base(filePath),
-		Path:      fmt.Sprintf("%s/%s", userID, filePath),
-		Size:      int64(len(data)),
-		MimeType:  mimeType,
-		UserID:    userID,
-		Checksum:  hex.EncodeToString(checksum[:]),
-		CreatedAt: now,
-		UpdatedAt: now,
-	}, nil
+	return nil, errS3NotImplemented
 }
 
 func (s *S3Storage) Download(userID, filePath string) (io.ReadCloser, *models.FileInfo, error) {
-	return nil, nil, fmt.Errorf("S3 download not yet implemented")
+	return nil, nil, errS3NotImplemented
 }
 
 func (s *S3Storage) Delete(userID, filePath string) error {
-	return fmt.Errorf("S3 delete not yet implemented")
+	return errS3NotImplemented
 }
 
 func (s *S3Storage) List(userID, prefix string, page, pageSize int) ([]*models.FileInfo, int, error) {
-	return []*models.FileInfo{}, 0, nil
+	return nil, 0, errS3NotImplemented
 }
 
 func (s *S3Storage) Info(userID, filePath string) (*models.FileInfo, error) {
-	return nil, fmt.Errorf("S3 info not yet implemented")
+	return nil, errS3NotImplemented
 }

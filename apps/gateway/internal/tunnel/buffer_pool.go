@@ -179,9 +179,10 @@ func setUDSocketOptions(conn *net.UDPConn, qos *QoSConfig) error {
 	if err != nil {
 		return err
 	}
+	sockBuf := int(udpSocketBufferSize.Load())
 	return raw.Control(func(fd uintptr) {
-		unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, udpSocketBufferSize)
-		unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF, udpSocketBufferSize)
+		unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, sockBuf)
+		unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF, sockBuf)
 		if qos != nil && qos.DSCP > 0 {
 			priority := qos.DSCP << 2
 			_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_TOS, priority)

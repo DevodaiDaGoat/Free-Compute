@@ -1,613 +1,80 @@
-uh so baisically read the md files in the repo and this md formatted text and you can get the whole gist
+FreeCompute - Change Index
+==========================
+All planning docs live in: docs/
 
-<div align="center">
-# FreeCompute
-### Community-Powered Cloud Computing
-Launch secure cloud desktops, development environments, and gaming sessions directly from your browser.
-Powered by donated computers and cloud infrastructure.
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-Pre--Alpha-orange)]()
-[![Platform](https://img.shields.io/badge/platform-Web-blue)]()
-[![Made With](https://img.shields.io/badge/Made%20With-Go%20%7C%20Next.js%20%7C%20React-success)]()
-</div>
----
-# 🚀 What is FreeCompute?
-FreeCompute is an open-source distributed cloud computing platform that allows users to launch virtual desktops directly from their browser.
-Instead of relying entirely on expensive cloud providers, FreeCompute combines donated computers, community-hosted machines, and cloud infrastructure into one distributed network.
-Whether you're developing software, browsing the web, testing applications, or gaming remotely, FreeCompute provides secure virtual machines that are accessible from anywhere.
----
-# ✨ Features
-## 🌐 Browser-Based Desktop
-- Custom WebOS
-- File manager
-- Terminal
-- Browser
-- Window manager
-- Multiple applications
-- Virtual desktops
-- Responsive interface
----
-## 💻 Community-Powered Infrastructure
-Contribute idle hardware to the network.
-Donate:
-- CPU
-- RAM
-- GPU
-- Storage
-- Bandwidth
-Receive community rewards while helping others.
----
-## ⚡ Smart Galaxy Scheduler
-Automatically selects the best available machine based on:
-- Region
-- Network latency
-- CPU utilization
-- RAM availability
-- GPU availability
-- Host health
-- Queue length
-- Resource requirements
----
-## 🎮 Gaming Support
-Gaming is a first-class feature.
-Supported:
-- Browser streaming
-- Controller support
-- Fullscreen mode
-- Low-latency streaming
-- GPU scheduling
-- Adaptive bitrate
-- Adaptive resolution
-Future plans:
-- Steam integration
-- Game launcher
-- Cloud save support
-- Dedicated gaming hosts
----
-## 🖥 Remote Desktop
-Secure remote desktop sessions.
-Features include:
-- Browser access
-- Clipboard sync
-- File transfers
-- Audio forwarding
-- Multiple display support (planned)
-- Temporary session links
-- Secure authentication
----
-## 💳 Credit System
-FreeCompute uses Credits instead of subscriptions.
-Credits may be earned by:
-- Hosting computers
-- Community testing
-- Bug reports
-- Events
-- Contributions
-- Optional purchases (future)
-Credits can unlock:
-- More CPU
-- More RAM
-- GPU access
-- Longer sessions
-- Priority queue
----
-## 🔒 Security
-Security is built into every layer.
-Features include:
-- Email verification
-- Optional multi-factor authentication
-- Signed host agents
-- JWT authentication
-- TLS encryption
-- Session isolation
-- Sandboxed virtual machines
-- Malware scanning for uploads
-- Audit logging
-- Role-based permissions
----
-# 🏗 Architecture
-```
-                Internet
-                    │
-          Cloudflare Tunnel
-                    │
-             API Gateway
-                    │
-          Authentication Service
-                    │
-             Orchestrator
-                    │
-           Galaxy Scheduler
-                    │
-      ┌─────────────┴─────────────┐
-      │                           │
- Community Hosts           Cloud Hosts
-      │                           │
-      └─────────────┬─────────────┘
-                    │
-              Virtual Machine
-                    │
-            WebRTC Streaming
-                    │
-              Browser Client
-```
----
-# 📦 Monorepo Structure
-```
-apps/
-    frontend/
-    gateway/
-    auth-service/
-    scheduler/
-    billing-service/
-    file-service/
-    host-control/
-    admin-api/
-    notifications/
-    orchestrator/
-desktop/
-host-agent/
-packages/
-    ui/
-    api-types/
-    utils/
-    config/
-    logger/
-    database/
-    auth/
-    websocket/
-    theme/
-    sdk/
-docs/
-scripts/
-infrastructure/
-tests/
-```
----
-# 🖥 WebOS
-FreeCompute includes a custom browser-based operating system.
-Applications include:
-- Terminal
-- Browser
-- Files
-- Settings
-- Task Manager
-- System Monitor
-- Store
-Future applications:
-- VS Code
-- Firefox
-- Chrome
-- Discord
-- Steam
-- Minecraft Launcher
----
-# 🛰 Host Agent
-Users can contribute computers securely.
-The Host Agent provides:
-- Automatic registration
-- Heartbeats
-- Resource monitoring
-- Secure communication
-- Automatic updates
-- Job execution
-- Crash recovery
-- Usage reporting
----
-# 🧠 Galaxy Scheduler
-The scheduler continuously evaluates:
-- Host health
-- Region
-- Latency
-- CPU usage
-- RAM usage
-- GPU availability
-- Queue length
-- Storage
-- Network quality
-Its goal is to provide the best experience while protecting host machines from overload.
----
-# 🧩 Tech Stack
-## Frontend
-- Next.js 15
-- React 19
-- TypeScript
-- Tailwind CSS v4
-- shadcn/ui
-- Framer Motion
-- Zustand
-- TanStack Query
-- React Hook Form
-- Zod
-## Backend
-- Go
-- Node.js
-- PostgreSQL
-- Redis
-- WebSockets
-## Desktop
-- React
-- TypeScript
-- WebRTC
-## Infrastructure
-- Docker
-- Docker Compose
-- Kubernetes
-- GitHub Actions
-- Cloudflare Tunnel
----
-# 📈 Roadmap
-## Phase 1
-- Monorepo
-- Shared UI
-- Landing page
-- Authentication
-- Dashboard
-## Phase 2
-- Queue
-- Credit system
-- Host Agent
-- Scheduler
-- Basic Linux VM
-## Phase 3
-- WebOS
-- Window manager
-- Terminal
-- File manager
-- Browser
-## Phase 4
-- GPU scheduling
-- Gaming mode
-- Remote desktop improvements
-- Persistent storage
-- Snapshots
-## Phase 5
-- Global infrastructure
-- High availability
-- Marketplace
-- Public API
-- SDK
----
-# 🤝 Contributing
-Contributions are welcome.
-Please read:
-- CONTRIBUTING.md
-- CODE_OF_CONDUCT.md
-- SECURITY.md
-before opening a Pull Request.
----
-# 📖 Documentation
-Project documentation lives inside:
-```
-docs/
-```
-Including:
-- Architecture
-- API
-- Development Guide
-- Desktop Design
-- Backend Services
-- Scheduler
-- Deployment
----
-# 🌎 Vision
-Our long-term goal is to build a free, open-source cloud computing platform powered by the community.
-Instead of requiring expensive infrastructure, FreeCompute allows anyone to contribute unused computing resources to help power desktops, development environments, and remote workloads for others.
-By combining donated hardware with cloud infrastructure, we aim to make secure, browser-based computing more accessible while remaining transparent, extensible, and community-driven.
----
-# 📜 License
-Released under the MIT License.
-See LICENSE for more information.
----
-<div align="center">
-### ⭐ If you like this project, consider starring the repository!
-Built with ❤️ by the FreeCompute community.
-</div>
+To make a change, find the relevant doc below, read it, then edit code.
 
-uh so baisically read the md files in the repo and this md formatted text and you can get the whole gist
+RUNNING THE PROJECT
+  Website + gateway:  ./start-website.sh
+  VM host agent:      ./start-vms.sh  (FREECOMPUTE_RESOURCE_PCT=50 by default)
+  Full stack:         ./run-backend.sh
+  VM dry-run check:   cd host-agent && go run ./cmd/vm-setup --dry-run
 
-<div align="center">
-# FreeCompute
-### Community-Powered Cloud Computing
-Launch secure cloud desktops, development environments, and gaming sessions directly from your browser.
-Powered by donated computers and cloud infrastructure.
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-Pre--Alpha-orange)]()
-[![Platform](https://img.shields.io/badge/platform-Web-blue)]()
-[![Made With](https://img.shields.io/badge/Made%20With-Go%20%7C%20Next.js%20%7C%20React-success)]()
-</div>
----
-# 🚀 What is FreeCompute?
-FreeCompute is an open-source distributed cloud computing platform that allows users to launch virtual desktops directly from their browser.
-Instead of relying entirely on expensive cloud providers, FreeCompute combines donated computers, community-hosted machines, and cloud infrastructure into one distributed network.
-Whether you're developing software, browsing the web, testing applications, or gaming remotely, FreeCompute provides secure virtual machines that are accessible from anywhere.
----
-# ✨ Features
-## 🌐 Browser-Based Desktop
-- Custom WebOS
-- File manager
-- Terminal
-- Browser
-- Window manager
-- Multiple applications
-- Virtual desktops
-- Responsive interface
----
-## 💻 Community-Powered Infrastructure
-Contribute idle hardware to the network.
-Donate:
-- CPU
-- RAM
-- GPU
-- Storage
-- Bandwidth
-Receive community rewards while helping others.
----
-## ⚡ Smart Galaxy Scheduler
-Automatically selects the best available machine based on:
-- Region
-- Network latency
-- CPU utilization
-- RAM availability
-- GPU availability
-- Host health
-- Queue length
-- Resource requirements
----
-## 🎮 Gaming Support
-Gaming is a first-class feature.
-Supported:
-- Browser streaming
-- Controller support
-- Fullscreen mode
-- Low-latency streaming
-- GPU scheduling
-- Adaptive bitrate
-- Adaptive resolution
-Future plans:
-- Steam integration
-- Game launcher
-- Cloud save support
-- Dedicated gaming hosts
----
-## 🖥 Remote Desktop
-Secure remote desktop sessions.
-Features include:
-- Browser access
-- Clipboard sync
-- File transfers
-- Audio forwarding
-- Multiple display support (planned)
-- Temporary session links
-- Secure authentication
----
-## 💳 Credit System
-FreeCompute uses Credits instead of subscriptions.
-Credits may be earned by:
-- Hosting computers
-- Community testing
-- Bug reports
-- Events
-- Contributions
-- Optional purchases (future)
-Credits can unlock:
-- More CPU
-- More RAM
-- GPU access
-- Longer sessions
-- Priority queue
----
-## 🔒 Security
-Security is built into every layer.
-Features include:
-- Email verification
-- Optional multi-factor authentication
-- Signed host agents
-- JWT authentication
-- TLS encryption
-- Session isolation
-- Sandboxed virtual machines
-- Malware scanning for uploads
-- Audit logging
-- Role-based permissions
----
-# 🏗 Architecture
-```
-                Internet
-                    │
-          Cloudflare Tunnel
-                    │
-             API Gateway
-                    │
-          Authentication Service
-                    │
-             Orchestrator
-                    │
-           Galaxy Scheduler
-                    │
-      ┌─────────────┴─────────────┐
-      │                           │
- Community Hosts           Cloud Hosts
-      │                           │
-      └─────────────┬─────────────┘
-                    │
-              Virtual Machine
-                    │
-            WebRTC Streaming
-                    │
-              Browser Client
-```
----
-# 📦 Monorepo Structure
-```
-apps/
-    frontend/
-    gateway/
-    auth-service/
-    scheduler/
-    billing-service/
-    file-service/
-    host-control/
-    admin-api/
-    notifications/
-    orchestrator/
-desktop/
-host-agent/
-packages/
-    ui/
-    api-types/
-    utils/
-    config/
-    logger/
-    database/
-    auth/
-    websocket/
-    theme/
-    sdk/
-docs/
-scripts/
-infrastructure/
-tests/
-```
----
-# 🖥 WebOS
-FreeCompute includes a custom browser-based operating system.
-Applications include:
-- Terminal
-- Browser
-- Files
-- Settings
-- Task Manager
-- System Monitor
-- Store
-Future applications:
-- VS Code
-- Firefox
-- Chrome
-- Discord
-- Steam
-- Minecraft Launcher
----
-# 🛰 Host Agent
-Users can contribute computers securely.
-The Host Agent provides:
-- Automatic registration
-- Heartbeats
-- Resource monitoring
-- Secure communication
-- Automatic updates
-- Job execution
-- Crash recovery
-- Usage reporting
----
-# 🧠 Galaxy Scheduler
-The scheduler continuously evaluates:
-- Host health
-- Region
-- Latency
-- CPU usage
-- RAM usage
-- GPU availability
-- Queue length
-- Storage
-- Network quality
-Its goal is to provide the best experience while protecting host machines from overload.
----
-# 🧩 Tech Stack
-## Frontend
-- Next.js 15
-- React 19
-- TypeScript
-- Tailwind CSS v4
-- shadcn/ui
-- Framer Motion
-- Zustand
-- TanStack Query
-- React Hook Form
-- Zod
-## Backend
-- Go
-- Node.js
-- PostgreSQL
-- Redis
-- WebSockets
-## Desktop
-- React
-- TypeScript
-- WebRTC
-## Infrastructure
-- Docker
-- Docker Compose
-- Kubernetes
-- GitHub Actions
-- Cloudflare Tunnel
----
-# 📈 Roadmap
-## Phase 1
-- Monorepo
-- Shared UI
-- Landing page
-- Authentication
-- Dashboard
-## Phase 2
-- Queue
-- Credit system
-- Host Agent
-- Scheduler
-- Basic Linux VM
-## Phase 3
-- WebOS
-- Window manager
-- Terminal
-- File manager
-- Browser
-## Phase 4
-- GPU scheduling
-- Gaming mode
-- Remote desktop improvements
-- Persistent storage
-- Snapshots
-## Phase 5
-- Global infrastructure
-- High availability
-- Marketplace
-- Public API
-- SDK
----
-# 🤝 Contributing
-Contributions are welcome.
-Please read:
-- CONTRIBUTING.md
-- CODE_OF_CONDUCT.md
-- SECURITY.md
-before opening a Pull Request.
----
-# 📖 Documentation
-Project documentation lives inside:
-```
-docs/
-```
-Including:
-- Architecture
-- API
-- Development Guide
-- Desktop Design
-- Backend Services
-- Scheduler
-- Deployment
----
-# 🌎 Vision
-Our long-term goal is to build a free, open-source cloud computing platform powered by the community.
-Instead of requiring expensive infrastructure, FreeCompute allows anyone to contribute unused computing resources to help power desktops, development environments, and remote workloads for others.
-By combining donated hardware with cloud infrastructure, we aim to make secure, browser-based computing more accessible while remaining transparent, extensible, and community-driven.
----
-# 📜 License
-Released under the MIT License.
-See LICENSE for more information.
----
-<div align="center">
-### ⭐ If you like this project, consider starring the repository!
-Built with ❤️ by the FreeCompute community.
-</div>
+LIVE SERVICES (dev)
+  Gateway:   http://localhost:8080   (Go — all business logic + tunnels)
+  Frontend:  http://localhost:3000   (Next.js 15 — console + WebOS)
+  WebOS:     http://localhost:3000/webos
 
-i just need this before august
+CURRENT STATUS (July 2026)
+  Phase 1  Architecture          DONE  docs/ARCHITECTURE.md
+  Phase 2  Core Implementation   DONE  docs/BACKEND_STRUCTURE.md
+  Phase 3  Performance           DONE  docs/PERFORMANCE_OPTIMIZATION.md
+  Phase 4  Connection Quality    IN PROGRESS  docs/CONNECTION_QUALITY.md
+  Phase 5  New Features          PLANNED      docs/NEW_FEATURES.md
+  Phase 6  Beta                  PLANNED      docs/ROADMAP.md
+
+RECENTLY ADDED (this sprint)
+  WebOS macOS-style desktop      docs/DESKTOP_STRUCTURE.md
+  Alt-Tab app switcher           (keyboard shortcut in WebOS)
+  Host Monitor app               (live CPU/RAM/GPU per host)
+  AI Log Monitor app             (heuristic threat detection)
+  Credits + crypto payment UI    (BTC/ETH/SOL/USDC deposit addresses)
+  Multiplexed binary tunnel      (single WebSocket, binary framing)
+  Security hardening             docs/SECURITY_AUTH.md
+    - CORS origin allowlist (no wildcard + credentials)
+    - /hosts/register + /hosts/metrics require tunnel token
+    - Usage IDOR fixed (userId forced from JWT)
+    - User enumeration fixed (same error for wrong email/pass)
+    - Password min length (8 chars)
+    - Internal errors no longer leaked to clients
+
+WHAT NEEDS REAL DEPENDENCIES
+  QEMU VM launch        needs: qemu-system-x86_64 installed
+  FFmpeg encoding       needs: ffmpeg installed + in PATH
+  Tailscale mesh        needs: tailscale installed + logged in
+  Stripe payments       needs: STRIPE_SECRET_KEY env
+  LLM moderation        needs: FREECOMPUTE_MODERATION_LLM_URL env
+
+VM RESOURCE ALLOCATION
+  Default:   50% of host (auto-detected)
+  Override:  FREECOMPUTE_RESOURCE_PCT=75  (in start-vms.sh)
+  Manual:    FREECOMPUTE_VM_CPUCORES=6 FREECOMPUTE_VM_RAMGB=4 FREECOMPUTE_VM_STORAGEGB=344
+  This machine (50%): 6 CPUs, 4GB RAM, 344GB disk
+
+KEY ENV VARS
+  FREECOMPUTE_TUNNEL_TOKEN     Gateway auth token (default: dev-token)
+  FREECOMPUTE_DB_PATH          SQLite DB location (default: /tmp/freecompute.db)
+  FREECOMPUTE_ADMIN_EMAIL      Admin account email (default: admin)
+  FREECOMPUTE_ADMIN_PASSWORD   Admin password (auto-generated if unset)
+  FREECOMPUTE_RESOURCE_PCT     VM resource allocation % (default: 50)
+  FREECOMPUTE_GATEWAY_ADDR     Gateway listen address (default: :8080)
+  FREECOMPUTE_CDN_HOSTNAME     Production CDN hostname
+  FREECOMPUTE_EDGE_HOSTNAME    Production edge hostname
+  FREECOMPUTE_MODERATION_LLM_URL  Optional LLM for AI moderation
+
+TO CHANGE SOMETHING
+  API endpoints & auth:     docs/BACKEND_STRUCTURE.md
+  Security policies:        docs/SECURITY_AUTH.md
+  Connection/latency:       docs/CONNECTION_QUALITY.md + docs/FASTEST_PATH.md
+  WebOS / UI layout:        docs/DESKTOP_STRUCTURE.md
+  VM scheduler logic:       docs/SCHEDULER_DESIGN.md
+  Networking internals:     docs/NETWORK_ACCELERATION.md
+  Full roadmap / phases:    docs/ROADMAP.md
+  Performance tips:         docs/OPTIMIZATION_TIPS.md + docs/PERFORMANCE_OPTIMIZATION.md
+  New feature ideas:        docs/IDEAS.md
+  Rate limiting config:     docs/RATE_LIMITING.md
+  Gaming streaming mode:    docs/GAMING_MODE.md
+  Session recording:        docs/SESSION_RECORDING_AND_TEMP_LINKS.md
+  Edge / CDN deployment:    docs/EDGE_BUNNYCDN_DEPLOYMENT.md
+  Admin console:            docs/ADMIN_CONSOLE.md
+  Getting started guide:    docs/GETTING_STARTED.md

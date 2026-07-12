@@ -11,10 +11,12 @@ const csp = [
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self' data:",
   "frame-ancestors 'none'",
-  // React hydration in development requires inline scripts and eval.
+  // React/Next.js hydration requires inline scripts. In production we still allow
+  // unsafe-inline (Next.js 15 needs it for the __next_f runtime bootstrap); when we
+  // wire up SSR nonces later this can drop to nonces only.
   isDev
     ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
-    : "script-src 'self'",
+    : "script-src 'self' 'unsafe-inline'",
 ].join('; ')
 
 const nextConfig: NextConfig = {
@@ -61,7 +63,10 @@ const nextConfig: NextConfig = {
           { key: 'X-Frame-Options', value: 'DENY' },
           { key: 'X-XSS-Protection', value: '1; mode=block' },
           { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
-          { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()' },
+          { key: 'Permissions-Policy', value: 'camera=(), microphone=(self), geolocation=(), interest-cohort=(), payment=()' },
+          { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
+          { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
+          { key: 'Cross-Origin-Resource-Policy', value: 'same-origin' },
         ]
 
     return [

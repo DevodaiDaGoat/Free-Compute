@@ -28,9 +28,43 @@ interface UserProfile {
 let currentTokens: AuthTokens | null = null;
 let currentUser: UserProfile | null = null;
 
+// Restore from sessionStorage on module load so a page reload doesn't drop
+// the auth state (previously any refresh silently logged the user out into
+// demo mode). We keep the module-scoped variable as the primary source of
+// truth; sessionStorage is a mirror that survives navigation between /webos
+// and /connect and lets api/websocket.ts pick up the token without importing
+// this file (which would create a circular dep).
+if (typeof window !== 'undefined') {
+  try {
+    const rawTokens = window.sessionStorage.getItem('freecompute:tokens');
+    if (rawTokens) currentTokens = JSON.parse(rawTokens);
+    const rawUser = window.sessionStorage.getItem('freecompute:user');
+    if (rawUser) currentUser = JSON.parse(rawUser);
+  } catch {
+    /* corrupt storage — ignore and start fresh */
+  }
+}
+
+function persistAuth() {
+  if (typeof window === 'undefined') return;
+  try {
+    if (currentTokens) window.sessionStorage.setItem('freecompute:tokens', JSON.stringify(currentTokens));
+    else window.sessionStorage.removeItem('freecompute:tokens');
+    if (currentUser) window.sessionStorage.setItem('freecompute:user', JSON.stringify(currentUser));
+    else window.sessionStorage.removeItem('freecompute:user');
+  } catch {
+    /* quota / disabled storage — ignore */
+  }
+}
+
 export function getTokens() { return currentTokens; }
 export function getUser() { return currentUser; }
 export function getGatewayUrl() { return GATEWAY; }
+export function clearAuth() {
+  currentTokens = null;
+  currentUser = null;
+  persistAuth();
+}
 
 export async function apiFetch(path: string, options?: RequestInit) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -230,13 +264,41 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
         const endpoint = isRegister ? '/auth/register' : '/auth/login';
         const body = isRegister ? { email, password, displayName: name } : { email, password };
         const data = await apiFetch(endpoint, { method: 'POST', body: JSON.stringify(body) });
+        // Defend against malformed backend responses: a 2xx with missing tokens
+        // or user (e.g. proxy stripping the body) previously stored `undefined`
+        // in sessionStorage and left the app in a half-authenticated state.
+        if (!data || !data.tokens || !data.tokens.accessToken || !data.user) {
+          throw new Error('Server returned an incomplete auth response');
+        }
         currentTokens = data.tokens;
         currentUser = data.user;
+        persistAuth();
         onLogin();
-      } catch {
-        // No backend available: sign in with a realistic simulated session
-        // so the desktop and its apps still have sensible fake data to show.
-        await new Promise((r) => setTimeout(r, 600));
+      } catch (err: any) {
+        // Distinguish backend-rejected credentials (surface as an error) from
+        // an unreachable gateway (fall back to demo mode). Previously ANY
+        // failure silently logged the user in as a demo user, hiding wrong-
+        // password prompts and misleading users about their real account.
+        const msg = String(err?.message || err || '');
+        const looksLikeAuthFailure =
+          /HTTP\s*4\d\d/i.test(msg) ||
+          /\bunauthorized|forbidden|invalid|not found|already exists|user\s*exists/i.test(msg);
+        let gatewayReachable = false;
+        try {
+          const ping = await fetch(`${GATEWAY}/healthz`, { method: 'GET' });
+          gatewayReachable = ping.ok || ping.status < 500;
+        } catch {
+          gatewayReachable = false;
+        }
+        if (gatewayReachable || looksLikeAuthFailure) {
+          setError(isRegister ? 'Registration failed. Check your input and try again.' : 'Sign-in failed. Check your email and password.');
+          setLoading(false);
+          return;
+        }
+        // No backend at all — keep the demo UX so devs can explore the
+        // WebOS offline. Real deployments will always hit the gateway path
+        // above and see proper errors.
+        await new Promise((r) => setTimeout(r, 400));
         currentTokens = {
           accessToken: 'demo-access-token',
           refreshToken: 'demo-refresh-token',
@@ -249,6 +311,7 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
           storageUsed: FAKE_STORAGE_USED,
           storageQuota: FAKE_STORAGE_QUOTA,
         };
+        persistAuth();
         onLogin();
       } finally {
         setLoading(false);

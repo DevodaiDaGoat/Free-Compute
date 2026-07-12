@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"encoding/binary"
+	"fmt"
 	"sync"
 )
 
@@ -72,7 +73,10 @@ func (m *MultiChannelManager) Send(id DataChannelID, data []byte) error {
 	ch, ok := m.channels[id]
 	m.mu.Unlock()
 	if !ok {
-		return nil
+		// Was returning nil silently — callers logged "sent" while the frame
+		// was black-holed. Now surfaces missing-channel as a real error so a
+		// misconfigured session doesn't look successful.
+		return fmt.Errorf("data channel %d not registered", id)
 	}
 
 	frame := make([]byte, 2+len(data))

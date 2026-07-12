@@ -68,14 +68,26 @@ func (m *Manager) Heartbeat(id string, metrics map[string]any) bool {
 	h.Online = true
 	h.LastHeartbeat = time.Now()
 
+	// Heartbeats intentionally cannot INCREASE capacity — a compromised
+	// (or spoofed) host-agent could otherwise register itself with
+	// realistic numbers and later heartbeat "cpuCores: 999999" to steer
+	// the scheduler onto a ghost machine. Capacity fields are set once at
+	// Register and may only *decrease* on heartbeat (a genuine hardware
+	// downgrade is possible; inflation is not).
 	if cpu, ok := metrics["cpuCores"].(float64); ok {
-		h.CPUCores = int(cpu)
+		if v := int(cpu); v > 0 && v < h.CPUCores {
+			h.CPUCores = v
+		}
 	}
 	if ram, ok := metrics["ramGb"].(float64); ok {
-		h.RAMGB = int(ram)
+		if v := int(ram); v > 0 && v < h.RAMGB {
+			h.RAMGB = v
+		}
 	}
 	if gpuVram, ok := metrics["gpuVramGb"].(float64); ok {
-		h.GPUVramGB = int(gpuVram)
+		if v := int(gpuVram); v >= 0 && v < h.GPUVramGB {
+			h.GPUVramGB = v
+		}
 	}
 	if uptime, ok := metrics["uptimeHours"].(float64); ok {
 		h.UptimeHours = int(uptime)

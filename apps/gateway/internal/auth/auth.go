@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/freecompute/free-compute/apps/gateway/internal/database"
@@ -63,6 +64,9 @@ func roleLevel(role string) int {
 	}
 }
 
+// RoleLevelOf is the exported form of roleLevel for use by other packages.
+func RoleLevelOf(role string) int { return roleLevel(role) }
+
 type TokenPair struct {
 	AccessToken  string    `json:"accessToken"`
 	RefreshToken string    `json:"refreshToken,omitempty"`
@@ -77,7 +81,7 @@ type AuthManager struct {
 	tokens         map[string]string
 	refreshTokens  map[string]string
 	tokenExpiry    map[string]time.Time
-	validationCount int
+	validationCount atomic.Int64
 	jwtSecret      []byte
 	db             *database.DB
 }
@@ -107,7 +111,6 @@ func newAuthManager(logger *log.Logger, db *database.DB) *AuthManager {
 		tokens:         make(map[string]string),
 		refreshTokens:  make(map[string]string),
 		tokenExpiry:    make(map[string]time.Time),
-		validationCount: 0,
 		jwtSecret:      secret,
 		db:             db,
 	}
@@ -171,9 +174,11 @@ func (m *AuthManager) Register(email, password, displayName string) (*User, *Tok
 		UpdatedAt:    now,
 	}
 
-	m.users[userID] = user
-	m.emails[email] = userID
-
+	// Persist to DB FIRST — if DB write fails we must not leave a phantom
+	// entry in the in-memory maps, since that would (a) be lost on restart
+	// and (b) block subsequent Register attempts with the same email because
+	// m.emails still holds the reservation. Reserve the maps only after the
+	// row is durable.
 	if m.db != nil {
 		if err := m.db.CreateUser(&database.UserRow{
 			ID:           userID,
@@ -182,7 +187,7 @@ func (m *AuthManager) Register(email, password, displayName string) (*User, *Tok
 			DisplayName:  displayName,
 			Verified:     true,
 			StorageQuota: 10 * 1024 * 1024 * 1024,
-		Role:         user.Role,
+			Role:         user.Role,
 			CreatedAt:    now,
 			UpdatedAt:    now,
 		}); err != nil {
@@ -190,6 +195,9 @@ func (m *AuthManager) Register(email, password, displayName string) (*User, *Tok
 			return nil, nil, fmt.Errorf("persist user: %w", err)
 		}
 	}
+
+	m.users[userID] = user
+	m.emails[email] = userID
 
 	m.cleanup()
 	tokens := m.generateTokens(userID)
@@ -205,7 +213,14 @@ func (m *AuthManager) Login(email, password string) (*User, *TokenPair, error) {
 	if !exists {
 		return nil, nil, ErrUserNotFound
 	}
-	user := m.users[userID]
+	user, userOK := m.users[userID]
+	if !userOK || user == nil {
+		// emails map holds a stale reservation for a user that no longer
+		// exists in the users map (e.g. DB load raced with an eviction).
+		// Previously the next line dereferenced user.PasswordHash → panic.
+		delete(m.emails, email)
+		return nil, nil, ErrUserNotFound
+	}
 	m.cleanup()
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
@@ -240,8 +255,7 @@ func (m *AuthManager) ValidateToken(token string) (*User, error) {
 		return nil, ErrUserNotFound
 	}
 
-	m.validationCount++
-	if m.validationCount%1000 == 0 {
+	if m.validationCount.Add(1)%1000 == 0 {
 		m.mu.Lock()
 		m.cleanup()
 		m.mu.Unlock()
@@ -299,17 +313,33 @@ func (m *AuthManager) persistUser(user *User) {
 
 func (m *AuthManager) AllocateTailscaleIP(userID string) string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	user, exists := m.users[userID]
 	if !exists {
+		m.mu.Unlock()
 		return ""
 	}
 	if user.TailscaleIP != "" {
-		return user.TailscaleIP
+		out := user.TailscaleIP
+		m.mu.Unlock()
+		return out
 	}
-	ip := fmt.Sprintf("100.%d.%d.%d", time.Now().UnixNano()%255, time.Now().UnixNano()%255, time.Now().UnixNano()%255)
+	// Use crypto/rand for octet uniqueness — three UnixNano%255 calls in the
+	// same nanosecond collapse to the same digit, so different users could get
+	// identical IPs. Also persist the allocation so a restart doesn't lose it.
+	var octets [3]byte
+	if _, err := rand.Read(octets[:]); err != nil {
+		// Fallback that at least varies across users in the same instant.
+		now := time.Now().UnixNano()
+		octets[0] = byte(now)
+		octets[1] = byte(now >> 8)
+		octets[2] = byte(now >> 16)
+	}
+	ip := fmt.Sprintf("100.%d.%d.%d", int(octets[0])%255, int(octets[1])%255, int(octets[2])%255)
 	user.TailscaleIP = ip
 	user.TailscaleProxy = "relay"
+	user.UpdatedAt = time.Now()
+	m.persistUser(user)
+	m.mu.Unlock()
 	return ip
 }
 
@@ -328,13 +358,20 @@ func (m *AuthManager) CheckStorageQuota(userID string, additionalBytes int64) er
 
 func (m *AuthManager) AddStorageUsed(userID string, bytes int64) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	user, exists := m.users[userID]
 	if !exists {
+		m.mu.Unlock()
 		return
 	}
 	user.StorageUsed += bytes
+	if user.StorageUsed < 0 {
+		user.StorageUsed = 0
+	}
 	user.UpdatedAt = time.Now()
+	m.mu.Unlock()
+	// Persist outside the lock — otherwise a DB stall would block every reader
+	// of AuthManager.users. persistUser is a no-op when m.db is nil.
+	m.persistUser(user)
 }
 
 func (m *AuthManager) ListAllUsers(fn func(*User)) {
@@ -426,14 +463,22 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"email and password required"}`, http.StatusBadRequest)
 		return
 	}
+	if len(req.Password) < 8 {
+		http.Error(w, `{"error":"password must be at least 8 characters"}`, http.StatusBadRequest)
+		return
+	}
+	if len(req.Email) > 254 || !strings.Contains(req.Email, "@") {
+		http.Error(w, `{"error":"invalid email"}`, http.StatusBadRequest)
+		return
+	}
 
 	user, tokens, err := h.auth.Register(req.Email, req.Password, req.DisplayName)
 	if err != nil {
-		status := http.StatusInternalServerError
 		if errors.Is(err, ErrUserExists) {
-			status = http.StatusConflict
+			http.Error(w, `{"error":"email already registered"}`, http.StatusConflict)
+		} else {
+			http.Error(w, `{"error":"registration failed"}`, http.StatusInternalServerError)
 		}
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), status)
 		return
 	}
 
@@ -455,11 +500,9 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	user, tokens, err := h.auth.Login(req.Email, req.Password)
 	if err != nil {
-		status := http.StatusUnauthorized
-		if errors.Is(err, ErrUserNotFound) {
-			status = http.StatusNotFound
-		}
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), status)
+		// Return the same status/message for both wrong email and wrong password
+		// to prevent user enumeration.
+		http.Error(w, `{"error":"invalid credentials"}`, http.StatusUnauthorized)
 		return
 	}
 
@@ -505,7 +548,7 @@ func (h *AuthHandler) Preferences(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		prefs, err := h.auth.GetPreferences(user.ID)
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			http.Error(w, `{"error":"could not load preferences"}`, http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"preferences": prefs})
@@ -518,11 +561,11 @@ func (h *AuthHandler) Preferences(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := h.auth.SavePreferences(user.ID, req.Preferences); err != nil {
-			status := http.StatusInternalServerError
 			if errors.Is(err, ErrUserNotFound) {
-				status = http.StatusNotFound
+				http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+			} else {
+				http.Error(w, `{"error":"could not save preferences"}`, http.StatusInternalServerError)
 			}
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), status)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})

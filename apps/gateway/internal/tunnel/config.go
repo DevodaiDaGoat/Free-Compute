@@ -172,8 +172,8 @@ func LoadConfigFromEnv() (Config, error) {
 		MaxProxyCacheMB:       intFromEnv("FREECOMPUTE_PROXY_CACHE_MAX_SIZE_MB", 256),
 		EnableSessionReplay:   strings.TrimSpace(os.Getenv("FREECOMPUTE_ENABLE_SESSION_REPLAY")) != "false",
 		EnableSpeedTest:       strings.TrimSpace(os.Getenv("FREECOMPUTE_ENABLE_SPEED_TEST")) != "false",
-		RecordingDir:          valueOrDefault(os.Getenv("FREECOMPUTE_RECORDING_DIR"), filepath.Join(os.TempDir(), "freecompute-recordings")),
-		DBPath:                valueOrDefault(os.Getenv("FREECOMPUTE_DB_PATH"), filepath.Join(os.TempDir(), "freecompute.db")),
+		RecordingDir:          valueOrDefault(os.Getenv("FREECOMPUTE_RECORDING_DIR"), defaultStatePath("freecompute-recordings", true)),
+		DBPath:                valueOrDefault(os.Getenv("FREECOMPUTE_DB_PATH"), defaultStatePath("freecompute.db", false)),
 		ModerationLLMURL:       valueOrDefault(os.Getenv("FREECOMPUTE_MODERATION_LLM_URL"), ""),
 		ModerationLLMKey:       valueOrDefault(os.Getenv("FREECOMPUTE_MODERATION_LLM_KEY"), ""),
 		DefaultBrowsingMode:    valueOrDefault(strings.ToLower(os.Getenv("FREECOMPUTE_DEFAULT_BROWSING_MODE")), "casual"),
@@ -308,6 +308,20 @@ func valueOrDefault(value string, fallback string) string {
 	}
 
 	return value
+}
+
+// defaultStatePath resolves a stateful file/directory path. When
+// FREECOMPUTE_STATE_DIR is set, everything lives under that dir so restarts
+// with a fresh state dir don't inherit stale DB rows from $TEMP (which caused
+// admin-seed collisions when the .admin-password sidecar was missing). Falls
+// back to $TEMP for backwards compatibility. `isDir` doesn't change the path,
+// it's kept for future callers that may need to distinguish.
+func defaultStatePath(name string, isDir bool) string {
+	_ = isDir
+	if dir := strings.TrimSpace(os.Getenv("FREECOMPUTE_STATE_DIR")); dir != "" {
+		return filepath.Join(dir, name)
+	}
+	return filepath.Join(os.TempDir(), name)
 }
 
 func secondsFromEnv(name string, fallback int) time.Duration {

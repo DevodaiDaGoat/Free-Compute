@@ -224,7 +224,13 @@ export default function BrowserApp() {
         srcDoc={srcDoc}
         style={{ flex: 1, border: 'none', background: '#fff' }}
         title="browser-content"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-pointer-lock"
+        // Do NOT combine allow-scripts with allow-same-origin — the MDN
+        // sandbox docs are explicit that this makes the iframe effectively
+        // un-sandboxed (the child can strip its own sandbox attribute and
+        // reach parent origin cookies/localStorage). Dropping
+        // allow-same-origin keeps scripting for proxied pages but pins the
+        // iframe to an opaque origin, so it cannot exfiltrate our JWT.
+        sandbox="allow-scripts allow-forms allow-popups allow-modals allow-pointer-lock"
       />
 
       <div

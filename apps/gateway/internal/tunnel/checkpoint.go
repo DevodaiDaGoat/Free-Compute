@@ -27,7 +27,7 @@ const (
 type SessionStateSnapshot struct {
 	SessionID      string            `json:"sessionId"`
 	Timestamp      time.Time         `json:"timestamp"`
-	Delta          bool              `json:"delta,omitempty"`
+	Delta          bool              `json:"delta"`
 	WindowState    map[string]string `json:"windowState,omitempty"`
 	Clipboard      string            `json:"clipboard,omitempty"`
 	InputSequence  uint32            `json:"inputSequence,omitempty"`
@@ -41,6 +41,9 @@ type CheckpointStore struct {
 	maxSize   int64
 	usedSize  int64
 	logger    *log.Logger
+
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 func NewCheckpointStore(maxSize int64, logger *log.Logger) *CheckpointStore {
@@ -54,6 +57,7 @@ func NewCheckpointStore(maxSize int64, logger *log.Logger) *CheckpointStore {
 		snapshots: make(map[string][]*SessionStateSnapshot),
 		maxSize:   maxSize,
 		logger:    logger,
+		stopCh:    make(chan struct{}),
 	}
 }
 
@@ -88,7 +92,18 @@ func (s *CheckpointStore) Save(snapshot *SessionStateSnapshot) error {
 
 	snapshots := s.snapshots[snapshot.SessionID]
 	if len(snapshots) > 0 && !snapshot.Delta {
-		snapshots = []*SessionStateSnapshot{{}}
+		// On a full (non-delta) save, discard all prior snapshots for this
+		// session AND subtract their sizes from usedSize. Previously the code
+		// replaced the slice with `[]*SessionStateSnapshot{{}}` (an empty
+		// placeholder) and never subtracted the old bytes, so usedSize grew
+		// unboundedly on every non-delta rewrite and Load found a nil-Data
+		// placeholder mixed in.
+		for _, old := range snapshots {
+			if old.Data != nil {
+				s.usedSize -= int64(len(old.Data))
+			}
+		}
+		snapshots = snapshots[:0]
 	} else if len(snapshots) > 0 && snapshot.Delta {
 		last := snapshots[len(snapshots)-1]
 		if last.Data != nil {
@@ -216,15 +231,23 @@ func (s *CheckpointStore) pruneExpired() {
 	for sessionID, snapshots := range s.snapshots {
 		pruned := make([]*SessionStateSnapshot, 0, len(snapshots))
 		for _, snap := range snapshots {
-			if now.Sub(snap.Timestamp) < checkpointColdTTL {
-				if !snap.Delta && now.Sub(snap.Timestamp) > checkpointWarmTTL {
-					s.usedSize -= int64(len(snap.Data))
-				} else {
-					pruned = append(pruned, snap)
-				}
-			} else {
+			age := now.Sub(snap.Timestamp)
+			// Beyond cold TTL: drop unconditionally.
+			if age >= checkpointColdTTL {
 				s.usedSize -= int64(len(snap.Data))
+				continue
 			}
+			// Between warm and cold TTL: keep FULL (non-delta) snapshots as
+			// resumption bases, drop DELTAS (they're only useful while their
+			// base is still recent). The previous logic did the inverse — it
+			// dropped full snapshots and kept deltas, which meant deltas
+			// couldn't be replayed and users lost their session history
+			// silently after ~1 hour.
+			if age > checkpointWarmTTL && snap.Delta {
+				s.usedSize -= int64(len(snap.Data))
+				continue
+			}
+			pruned = append(pruned, snap)
 		}
 		if len(pruned) == 0 {
 			delete(s.snapshots, sessionID)
@@ -238,10 +261,24 @@ func (s *CheckpointStore) StartPruning() {
 	go func() {
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
-		for range ticker.C {
-			s.pruneExpired()
+		for {
+			select {
+			case <-ticker.C:
+				s.pruneExpired()
+			case <-s.stopCh:
+				return
+			}
 		}
 	}()
+}
+
+// Stop signals the pruning goroutine to exit. Safe to call multiple times.
+func (s *CheckpointStore) Stop() {
+	s.stopOnce.Do(func() {
+		if s.stopCh != nil {
+			close(s.stopCh)
+		}
+	})
 }
 
 func checksumSnapshot(s *SessionStateSnapshot) string {

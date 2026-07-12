@@ -46,6 +46,11 @@ func (c *Collector) Start(ctx context.Context) {
 
 	c.logger.Printf("metrics collector started (interval: %v)", c.interval)
 
+	// Prime the health components immediately so /health/detail doesn't
+	// return a stale/empty snapshot for the first interval window (users see
+	// 200 rather than a transient inconsistency).
+	c.collect()
+
 	for {
 		select {
 		case <-ctx.Done():

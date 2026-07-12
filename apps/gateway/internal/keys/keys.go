@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/freecompute/free-compute/apps/gateway/internal/auth"
 )
 
 type KeyType string
@@ -86,7 +89,7 @@ func (m *Manager) Add(userID, name, publicKey string) (*SSHKey, error) {
 	m.keys[userID] = append(m.keys[userID], key)
 	m.mu.Unlock()
 
-	m.logger.Printf("SSH key added: %s (%s %d) for user %s", id[:8], keyType, keySize, userID[:8])
+	m.logger.Printf("SSH key added: %s (%s %d) for user %s", shortID(id, 8), keyType, keySize, shortID(userID, 8))
 	return key, nil
 }
 
@@ -108,7 +111,7 @@ func (m *Manager) Delete(id, userID string) error {
 	for i, k := range keys {
 		if k.ID == id {
 			m.keys[userID] = append(keys[:i], keys[i+1:]...)
-			m.logger.Printf("SSH key deleted: %s", id[:8])
+			m.logger.Printf("SSH key deleted: %s", shortID(id, 8))
 			return nil
 		}
 	}
@@ -160,7 +163,8 @@ func parsePublicKey(pubKey string) (fingerprint string, keyType KeyType, keySize
 	}
 
 	hash := sha256.Sum256(data)
-	fingerprint = fmt.Sprintf("SHA256:%x", hash)
+	// OpenSSH fingerprint format is unpadded base64 of the raw sha256 digest.
+	fingerprint = "SHA256:" + base64.RawStdEncoding.EncodeToString(hash[:])
 
 	switch {
 	case strings.HasPrefix(keyTypeStr, "ssh-ed25519"):
@@ -189,7 +193,7 @@ func parsePEMKey(block *pem.Block) (string, KeyType, int, error) {
 		}
 		data, _ := x509.MarshalPKIXPublicKey(key)
 		hash := sha256.Sum256(data)
-		return fmt.Sprintf("SHA256:%x", hash), KeyTypeRSA, key.Size() * 8, nil
+		return "SHA256:" + base64.RawStdEncoding.EncodeToString(hash[:]), KeyTypeRSA, key.Size() * 8, nil
 	default:
 		return "", "", 0, fmt.Errorf("unsupported PEM type: %s", block.Type)
 	}
@@ -201,7 +205,7 @@ func parseCryptoKey(key crypto.PublicKey) (string, KeyType, int, error) {
 		return "", "", 0, fmt.Errorf("marshal key: %w", err)
 	}
 	hash := sha256.Sum256(data)
-	fingerprint := fmt.Sprintf("SHA256:%x", hash)
+	fingerprint := "SHA256:" + base64.RawStdEncoding.EncodeToString(hash[:])
 
 	switch k := key.(type) {
 	case *rsa.PublicKey:
@@ -215,20 +219,48 @@ func parseCryptoKey(key crypto.PublicKey) (string, KeyType, int, error) {
 	}
 }
 
+// decodeBase64 decodes standard OpenSSH key material (base64, may be padded or
+// unpadded). Prior implementation used fmt.Sscanf %x which parses hex, not
+// base64, so every OpenSSH-format add silently produced an incorrect
+// fingerprint.
 func decodeBase64(s string) ([]byte, error) {
-	decoded := make([]byte, len(s))
-	n, err := fmt.Sscanf(s, "%x", &decoded)
-	if n > 0 {
-		return decoded, nil
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, fmt.Errorf("empty key data")
 	}
-	_ = err
-	return nil, fmt.Errorf("cannot decode")
+	if data, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return data, nil
+	}
+	// Some clients emit unpadded base64.
+	if data, err := base64.RawStdEncoding.DecodeString(s); err == nil {
+		return data, nil
+	}
+	return nil, fmt.Errorf("invalid base64 key data")
+}
+
+// resolveUserID picks the effective userID for a key operation. The caller's
+// JWT-derived ID always wins to prevent IDOR (e.g. ?userId=someone-else). Only
+// admins may target a different account, and only via an explicit query param.
+func resolveUserID(r *http.Request) (string, bool) {
+	user := auth.UserFromContext(r)
+	if user == nil {
+		return "", false
+	}
+	// Compare against the role-level ladder so any admin-or-higher role
+	// (superadmin etc.) gets the override path. `user.Role == "admin"` as a
+	// literal missed mixed-case values and future roles.
+	if auth.RoleLevelOf(user.Role) >= auth.RoleAdmin {
+		if q := r.URL.Query().Get("userId"); q != "" {
+			return q, true
+		}
+	}
+	return user.ID, true
 }
 
 func (m *Manager) HandleKeys(w http.ResponseWriter, r *http.Request) {
-	userID := r.URL.Query().Get("userId")
-	if userID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId required"})
+	userID, ok := resolveUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
 
@@ -264,9 +296,9 @@ func (m *Manager) HandleKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) HandleKeyOps(w http.ResponseWriter, r *http.Request) {
-	userID := r.URL.Query().Get("userId")
-	if userID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId required"})
+	userID, ok := resolveUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
 
@@ -304,4 +336,14 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(value)
+}
+
+// shortID returns up to n leading chars of s for logging. Prior code did
+// bare `id[:8]` which panics when the caller supplied a string shorter than
+// the slice bound.
+func shortID(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }

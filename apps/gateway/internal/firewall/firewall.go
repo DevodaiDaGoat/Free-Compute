@@ -5,8 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/freecompute/free-compute/apps/gateway/internal/auth"
 )
 
 type Direction string
@@ -158,22 +162,28 @@ func (m *Manager) CreateRule(rule *Rule) *Rule {
 	}
 
 	m.rules[id] = rule
-	m.logger.Printf("firewall rule created: %s (%s %s)", id[:8], rule.Direction, rule.Protocol)
+	shortID := id
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	m.logger.Printf("firewall rule created: %s (%s %s)", shortID, rule.Direction, rule.Protocol)
 	return rule
 }
 
+// ListRules returns rules visible to userID. Rules with an empty UserID are
+// treated as shared defaults (seeded set) and are visible to every caller.
+// Rules owned by other users are excluded — the previous implementation
+// returned everything regardless of userID, leaking rules across tenants.
+// If userID == "" (admin listing), all rules are returned.
 func (m *Manager) ListRules(userID string) []*Rule {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var result []*Rule
-	now := time.Now()
 	for _, r := range m.rules {
-		ruleCopy := *r
-		ruleCopy.CreatedAt = now
-		ruleCopy.UpdatedAt = now
-		_ = ruleCopy
-		result = append(result, r)
+		if userID == "" || r.UserID == "" || r.UserID == userID {
+			result = append(result, r)
+		}
 	}
 	return result
 }
@@ -184,13 +194,19 @@ func (m *Manager) GetRule(id string) *Rule {
 	return m.rules[id]
 }
 
-func (m *Manager) UpdateRule(id string, updates map[string]any) (*Rule, error) {
+// UpdateRule mutates a rule if the caller owns it (or is an admin). Shared
+// default rules (empty UserID) may only be edited by an admin — otherwise a
+// moderator could edit the deny-all rule and open the default firewall.
+func (m *Manager) UpdateRule(id string, updates map[string]any, callerID string, isAdmin bool) (*Rule, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	rule, ok := m.rules[id]
 	if !ok {
 		return nil, fmt.Errorf("rule not found")
+	}
+	if !isAdmin && rule.UserID != callerID {
+		return nil, fmt.Errorf("not authorized")
 	}
 
 	if v, ok := updates["name"].(string); ok {
@@ -203,22 +219,38 @@ func (m *Manager) UpdateRule(id string, updates map[string]any) (*Rule, error) {
 		rule.Enabled = v
 	}
 	if v, ok := updates["action"].(string); ok {
-		rule.Action = Action(v)
+		// Validate against the Action enum — previously `Action(v)` accepted
+		// arbitrary strings so a rule could carry a nonsense action.
+		switch Action(v) {
+		case ActionAllow, ActionDeny:
+			rule.Action = Action(v)
+		default:
+			return nil, fmt.Errorf("invalid action: %s", v)
+		}
 	}
 	if v, ok := updates["cidr"].(string); ok {
 		rule.CIDR = v
+	}
+	if v, ok := updates["priority"].(float64); ok {
+		rule.Priority = int(v)
 	}
 	rule.UpdatedAt = time.Now()
 
 	return rule, nil
 }
 
-func (m *Manager) DeleteRule(id string) error {
+// DeleteRule removes a rule if the caller owns it (or is admin). Shared
+// defaults (empty UserID) only deletable by admin.
+func (m *Manager) DeleteRule(id, callerID string, isAdmin bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, ok := m.rules[id]; !ok {
+	rule, ok := m.rules[id]
+	if !ok {
 		return fmt.Errorf("rule not found")
+	}
+	if !isAdmin && rule.UserID != callerID {
+		return fmt.Errorf("not authorized")
 	}
 	delete(m.rules, id)
 
@@ -259,9 +291,14 @@ func (m *Manager) ListGroups(userID string) []*SecurityGroup {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	var result []*SecurityGroup
+	result := make([]*SecurityGroup, 0, len(m.groups))
 	for _, g := range m.groups {
-		result = append(result, g)
+		// Cross-tenant leak fix: previously returned every group regardless of
+		// userID. Non-empty userID scopes to that user + shared groups (UserID
+		// == ""). Empty userID (admin) returns everything.
+		if userID == "" || g.UserID == "" || g.UserID == userID {
+			result = append(result, g)
+		}
 	}
 	return result
 }
@@ -326,19 +363,27 @@ func (m *Manager) Evaluate(vmID string) []*Rule {
 }
 
 func sortRules(rules []*Rule) {
-	for i := 0; i < len(rules); i++ {
-		for j := i + 1; j < len(rules); j++ {
-			if rules[i].Priority > rules[j].Priority {
-				rules[i], rules[j] = rules[j], rules[i]
-			}
-		}
-	}
+	// O(n log n) sort. The previous selection sort was O(n²) — hundreds of
+	// rules per Evaluate call added measurable overhead in the tunnel path.
+	sort.Slice(rules, func(i, j int) bool { return rules[i].Priority < rules[j].Priority })
 }
 
 func (m *Manager) HandleRules(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r)
+	if user == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	isAdmin := auth.RoleLevelOf(user.Role) >= auth.RoleAdmin
+
 	switch r.Method {
 	case "GET":
-		rules := m.ListRules("")
+		// Admins see every rule; other callers see their own + shared defaults.
+		listArg := user.ID
+		if isAdmin {
+			listArg = ""
+		}
+		rules := m.ListRules(listArg)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"rules": rules,
 			"count": len(rules),
@@ -349,6 +394,9 @@ func (m *Manager) HandleRules(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 			return
 		}
+		// Force ownership to the caller so a client can't create a rule under
+		// another user's namespace by setting rule.UserID in the payload.
+		rule.UserID = user.ID
 		result := m.CreateRule(&rule)
 		writeJSON(w, http.StatusCreated, result)
 	default:
@@ -357,9 +405,16 @@ func (m *Manager) HandleRules(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) HandleRuleOps(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r)
+	if user == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	isAdmin := auth.RoleLevelOf(user.Role) >= auth.RoleAdmin
+
 	path := r.URL.Path
-	id := stringsTrimPrefix(path, "/firewall/rules/")
-	if idx := stringsIndexByte(id, '/'); idx >= 0 {
+	id := strings.TrimPrefix(path, "/firewall/rules/")
+	if idx := strings.IndexByte(id, '/'); idx >= 0 {
 		id = id[:idx]
 	}
 
@@ -367,6 +422,11 @@ func (m *Manager) HandleRuleOps(w http.ResponseWriter, r *http.Request) {
 	case "GET":
 		rule := m.GetRule(id)
 		if rule == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
+			return
+		}
+		// Non-admin callers can only view their own rules + shared defaults.
+		if !isAdmin && rule.UserID != "" && rule.UserID != user.ID {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
 			return
 		}
@@ -378,16 +438,24 @@ func (m *Manager) HandleRuleOps(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 			return
 		}
-		rule, err := m.UpdateRule(id, updates)
+		rule, err := m.UpdateRule(id, updates, user.ID, isAdmin)
 		if err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			status := http.StatusNotFound
+			if err.Error() == "not authorized" {
+				status = http.StatusForbidden
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, rule)
 
 	case "DELETE":
-		if err := m.DeleteRule(id); err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		if err := m.DeleteRule(id, user.ID, isAdmin); err != nil {
+			status := http.StatusNotFound
+			if err.Error() == "not authorized" {
+				status = http.StatusForbidden
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -398,9 +466,19 @@ func (m *Manager) HandleRuleOps(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) HandleGroups(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r)
+	if user == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	isAdmin := auth.RoleLevelOf(user.Role) >= auth.RoleAdmin
 	switch r.Method {
 	case "GET":
-		groups := m.ListGroups("")
+		scope := user.ID
+		if isAdmin {
+			scope = ""
+		}
+		groups := m.ListGroups(scope)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"groups": groups,
 			"count":  len(groups),
@@ -410,6 +488,10 @@ func (m *Manager) HandleGroups(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&group); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 			return
+		}
+		// Force ownership to the caller unless an admin explicitly overrides.
+		if !isAdmin || group.UserID == "" {
+			group.UserID = user.ID
 		}
 		result := m.CreateGroup(&group)
 		writeJSON(w, http.StatusCreated, result)
@@ -446,18 +528,3 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	json.NewEncoder(w).Encode(value)
 }
 
-func stringsTrimPrefix(s, prefix string) string {
-	if len(s) >= len(prefix) && s[:len(prefix)] == prefix {
-		return s[len(prefix):]
-	}
-	return s
-}
-
-func stringsIndexByte(s string, b byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
-}
